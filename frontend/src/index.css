@@ -1,0 +1,151 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  :root {
+    color-scheme: dark;
+    --cad-bg: 12 14 18;
+    --cad-canvas: 16 19 24;
+    --cad-inset: 10 13 18;
+    --cad-raised: 14 18 24;
+    --cad-surface: 19 23 32;
+    --cad-panel: 21 25 33;
+    --cad-header: 26 32 44;
+    --cad-hover: 32 40 54;
+    --cad-border: 38 47 63;
+    --cad-border-light: 55 65 81;
+    --cad-accent: 0 229 255;
+    --cad-gold: 255 214 0;
+    --cad-live: 0 230 118;
+    --cad-danger: 255 61 0;
+    --cad-text: 226 232 240;
+    --cad-muted: 139 152 165;
+    --cad-on-accent: 0 0 0;
+    --cad-chip: 8 47 61;
+    --cad-chip-hover: 14 78 99;
+    --cad-chip-gold: 66 48 0;
+    --cad-chip-live: 4 48 32;
+    --cad-accent-hot: 103 232 249;
+    --cad-grid: 33 41 54;
+    --cad-grid-dim: 24 31 42;
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background-color: rgb(var(--cad-bg));
+    color: rgb(var(--cad-text));
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+  }
+}
+
+/* Custom CAD Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgb(var(--cad-inset));
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--cad-border));
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--cad-border-light));
+}
+
+[data-plan-theme="neon"] .plan-frame {
+  box-shadow: inset 0 0 0 1px rgb(var(--cad-accent) / 0.38), 0 0 22px rgb(var(--cad-accent) / 0.08);
+}
+
+[data-plan-theme="neon"] .plan-brand {
+  letter-spacing: 0.14em;
+  text-shadow: 0 0 12px rgb(var(--cad-accent) / 0.8);
+}
+
+[data-plan-theme="golden"] .plan-frame {
+  box-shadow: inset 0 0 0 1px rgb(var(--cad-accent) / 0.5);
+}
+
+[data-plan-theme="golden"] .plan-brand {
+  font-family: "Palatino Linotype", Palatino, Georgia, serif;
+  letter-spacing: 0.08em;
+}
+
+[data-plan-theme="wow"] .plan-brand {
+  font-family: "Palatino Linotype", Palatino, Georgia, serif;
+  letter-spacing: 0.1em;
+  text-shadow: 0 0 10px rgb(var(--cad-accent) / 0.75);
+}
+
+[data-plan-theme="wow"] .plan-frame {
+  box-shadow:
+    inset 0 0 0 1px rgb(var(--cad-border-light) / 0.9),
+    inset 0 0 0 3px rgb(var(--cad-bg)),
+    inset 0 0 0 4px rgb(var(--cad-border) / 0.95);
+}
+
+/* CAD Crosshair Cursor styles */
+.cursor-cad-crosshair {
+  cursor: crosshair;
+}
+
+.cursor-cad-grab {
+  cursor: grab;
+}
+
+.cursor-cad-grabbing {
+  cursor: grabbing;
+}
+
+/* Keyframes for electric current flow animation */
+@keyframes wire-pulse {
+  0% {
+    stroke-dashoffset: 24;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes coil-energized {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(0, 230, 118, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 16px rgba(0, 230, 118, 0.8);
+  }
+}
+
+@keyframes lamp-glow {
+  0%, 100% {
+    filter: drop-shadow(0 0 6px #ffd600);
+  }
+  50% {
+    filter: drop-shadow(0 0 16px #ffea00);
+  }
+}
+
+.animate-wire-flow {
+  animation: wire-pulse 0.8s linear infinite;
+}
+
+.animate-coil {
+  animation: coil-energized 1.2s ease-in-out infinite;
+}
+
+.animate-lamp {
+  animation: lamp-glow 1s ease-in-out infinite;
+}

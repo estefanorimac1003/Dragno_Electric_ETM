@@ -1,0 +1,16 @@
+{
+  "name": "dragno-electric",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CAD & Electrical Simulation Suite with ControlMAX 360 UX and AutoCAD Aesthetics + DXF Export",
+  "scripts": {
+    "dev": "concurrently -k -p \"[{name}]\" -n \"BACKEND,FRONTEND\" -c \"cyan,magenta\" \"pnpm --filter dragno-electric-backend dev\" \"pnpm --filter dragno-electric-frontend dev\"",
+    "build": "pnpm --filter dragno-electric-frontend build",
+    "start": "node backend/index.js",
+    "start:frontend": "pnpm --filter dragno-electric-frontend preview",
+    "start:backend": "pnpm --filter dragno-electric-backend start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
