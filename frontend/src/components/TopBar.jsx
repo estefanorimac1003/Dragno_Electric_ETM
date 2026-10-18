@@ -11,6 +11,8 @@ import {
   FolderOpen,
   Play,
   Save,
+  Undo2,
+  Redo2,
   Square,
   Plus,
   X,
@@ -33,6 +35,10 @@ export default function TopBar({
   onZoomFit,
   onSaveProject,
   onOpenProject,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
   onExportDxf,
   onOpenSymbolEditor,
   isSimulating,
@@ -99,6 +105,33 @@ export default function TopBar({
 
         {/* Global Action Buttons: save, DXF export and simulation */}
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onUndo}
+            disabled={!canUndo}
+            className={`p-1.5 rounded border transition ${
+              canUndo
+                ? 'bg-autocad-panel hover:bg-autocad-chip border-autocad-border text-autocad-cyan'
+                : 'bg-autocad-panel border-autocad-border text-autocad-textMuted opacity-40'
+            }`}
+            title="Restaurar el diseño (Ctrl+Z)"
+          >
+            <Undo2 className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={onRedo}
+            disabled={!canRedo}
+            className={`p-1.5 rounded border transition ${
+              canRedo
+                ? 'bg-autocad-panel hover:bg-autocad-chip border-autocad-border text-autocad-cyan'
+                : 'bg-autocad-panel border-autocad-border text-autocad-textMuted opacity-40'
+            }`}
+            title="Volver hacia adelante (Ctrl+Y)"
+          >
+            <Redo2 className="w-4 h-4" />
+          </button>
+
           <button
             onClick={onSaveProject}
             className="flex items-center gap-1.5 px-3 py-1 bg-autocad-chipLive/70 hover:bg-autocad-chipLive border border-autocad-green/60 text-autocad-green font-medium rounded transition"
@@ -239,7 +272,7 @@ export default function TopBar({
                 ? 'bg-autocad-cyan text-autocad-onAccent font-bold'
                 : 'text-autocad-textMuted hover:text-white hover:bg-autocad-panel'
             }`}
-            title="Conectar Cableado Ortogonal (W)"
+            title="Cableado. Tocar un cable crea una unión con círculo (W)"
           >
             <GitCommit className="w-3.5 h-3.5" />
           </button>

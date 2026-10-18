@@ -1,13 +1,24 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Maximize2, Minimize2, Plus, RotateCcw, Save, Trash2, X, Zap } from 'lucide-react';
-import { CATEGORIES, SYMBOL_DEFINITIONS } from '../cad/symbolCatalog';
+import { CATEGORIES, SWITCH_GROUP, SYMBOL_DEFINITIONS } from '../cad/symbolCatalog';
+import { pushbuttonActuation } from '../cad/pushbutton';
 import { DEFAULT_LAYERS, cloneData, primitiveNodes } from '../cad/draw/geometry';
 import { useCadDraw } from '../cad/draw/useCadDraw';
 import { DEFAULT_PRIMITIVES, createBlankSymbol, deleteCustomSymbol, saveCustomSymbol } from '../cad/symbolStore';
 
-import { defaultPinLinks, livePinLinks } from '../cad/pinLinks';
-import { ioOf } from '../cad/ioKind';
+import { defaultPinLinks } from '../cad/pinLinks';
+import { emptyProgram, normalizeProgram, programLogicKey, stripActuatedBlocks, withActuatedBlock } from '../cad/blockProgram';
+import { userCanOperate } from '../cad/ioKind';
 import { DrawLayers, DrawProperties, DrawToolbox } from './draw/DrawChrome';
+import BlockProgramWindow from './BlockProgramWindow';
+
+function pinsForDrawing(pins) {
+  return (pins || []).map(pin => {
+    const copy = { ...pin };
+    delete copy.negate;
+    return copy;
+  });
+}
 
 const GRID_STEPS = [1, 2, 5, 10];
 const DEFAULT_PIN_RADIUS = 1.5;
@@ -18,6 +29,17 @@ function drawingSignature(list) {
     delete copy.id;
     return copy;
   }));
+}
+
+function mouseOperableSymbol(def, role) {
+  if (def) return userCanOperate(def);
+  return userCanOperate({ role: role || 'switch' });
+}
+
+function programForEditor(program, operable, name, role) {
+  if (role === 'motor') return emptyProgram();
+  const base = normalizeProgram(program);
+  return operable ? withActuatedBlock(base, name) : stripActuatedBlocks(base);
 }
 
 export default function SymbolEditorModal({
@@ -31,8 +53,8 @@ export default function SymbolEditorModal({
   const [symbolName, setSymbolName] = useState('Componente');
   const [symbolPrefix, setSymbolPrefix] = useState('K');
   const [symbolCategory, setSymbolCategory] = useState('Personalizados');
+  const [symbolActuation, setSymbolActuation] = useState('latch');
   const [symbolRole, setSymbolRole] = useState('switch');
-  const [symbolIo, setSymbolIo] = useState('in');
   const [symbolWidth, setSymbolWidth] = useState(40);
   const [symbolHeight, setSymbolHeight] = useState(50);
   const [pinRadius, setPinRadius] = useState(DEFAULT_PIN_RADIUS);
@@ -44,7 +66,9 @@ export default function SymbolEditorModal({
   const [spriteMode, setSpriteMode] = useState('rest');
   const [previewActive, setPreviewActive] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(true);
+  const [program, setProgram] = useState(() => emptyProgram());
+  const [programOpen, setProgramOpen] = useState(false);
   const [gridSnap, setGridSnap] = useState(true);
   const [objectSnap, setObjectSnap] = useState(true);
   const [gridSize, setGridSize] = useState(5);
@@ -57,6 +81,9 @@ export default function SymbolEditorModal({
   const openedRef = useRef(false);
   const restSpriteRef = useRef([]);
   const actuatedSpriteRef = useRef([]);
+  const programKeyRef = useRef('');
+  const symbolNameRef = useRef(symbolName);
+  symbolNameRef.current = symbolName;
   defsRef.current = symbolDefinitions;
 
   const ghost = spriteMode === 'actuated' ? restSpriteRef.current : actuatedSpriteRef.current;
@@ -101,23 +128,39 @@ export default function SymbolEditorModal({
       setPrimitives([]);
       setPins([]);
       setPinLinks([]);
+      programKeyRef.current = programLogicKey(emptyProgram());
+      setProgram(emptyProgram());
+      setSymbolRole('switch');
+      setSymbolActuation('latch');
       restSpriteRef.current = [];
       actuatedSpriteRef.current = [];
       setSpriteMode('rest');
       setLoadEpoch(value => value + 1);
       return;
     }
-    setSymbolName(def.name || 'Componente');
+    const loadedName = def.name || 'Componente';
+    symbolNameRef.current = loadedName;
+    setSymbolName(loadedName);
     setSymbolPrefix(def.prefix || 'K');
     setSymbolCategory(def.category || 'Personalizados');
+    setSymbolActuation(pushbuttonActuation(def));
     setSymbolRole(def.role || 'switch');
-    setSymbolIo(ioOf(def));
+    if (def.role === 'source' || def.role === 'motor') setProgramOpen(false);
     setSymbolWidth(def.width || 40);
     setSymbolHeight(def.height || 50);
     setPinRadius(def.pinRadius ?? DEFAULT_PIN_RADIUS);
-    const nextPins = def.pins ? cloneData(def.pins) : [];
+    const nextPins = pinsForDrawing(def.pins ? cloneData(def.pins) : []);
+    const nextLinks = Array.isArray(def.pinLinks) ? cloneData(def.pinLinks) : defaultPinLinks(nextPins);
     setPins(nextPins);
-    setPinLinks(Array.isArray(def.pinLinks) ? cloneData(def.pinLinks) : defaultPinLinks(nextPins));
+    setPinLinks(nextLinks);
+    const loadedProgram = programForEditor(
+      def.program,
+      def.role !== 'motor' && userCanOperate(def),
+      loadedName,
+      def.role
+    );
+    programKeyRef.current = programLogicKey(loadedProgram);
+    setProgram(loadedProgram);
     const rest = def.primitives
       ? cloneData(def.primitives)
       : (DEFAULT_PRIMITIVES[type] ? cloneData(DEFAULT_PRIMITIVES[type]) : []);
@@ -131,6 +174,14 @@ export default function SymbolEditorModal({
     setSpriteMode('rest');
     setLoadEpoch(value => value + 1);
   }, []);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setProgramOpen(false);
+      return;
+    }
+    setIsFullscreen(true);
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -150,6 +201,17 @@ export default function SymbolEditorModal({
     // Saving refreshes the catalog. The open drawing stays until the piece changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, selectedType, initialSymbolType, loadSymbol]);
+
+  useEffect(() => {
+    if (!isOpen || symbolRole === 'motor' || symbolRole === 'source') return;
+    const stored = defsRef.current?.[selectedType];
+    if (!mouseOperableSymbol(stored, symbolRole)) return;
+    setProgram(current => {
+      const next = withActuatedBlock(current, symbolNameRef.current);
+      if (next !== current) programKeyRef.current = programLogicKey(next);
+      return next;
+    });
+  }, [isOpen, symbolName, symbolRole, selectedType, symbolDefinitions]);
 
   const showSprite = (mode) => {
     if (mode === spriteMode) return;
@@ -174,7 +236,7 @@ export default function SymbolEditorModal({
     setSpriteMode('actuated');
   };
 
-  const handleSave = () => {
+  const writeSymbol = (programSource, announce, actuation = symbolActuation) => {
     if (!selectedType) return;
     const current = editor.collect();
     const restPrimitives = spriteMode === 'rest' ? current : restSpriteRef.current;
@@ -184,26 +246,43 @@ export default function SymbolEditorModal({
     const activePrimitives = drawingSignature(actuatedPrimitives) === drawingSignature(restPrimitives)
       ? []
       : actuatedPrimitives;
-    saveCustomSymbol({
+    const nextProgram = programForEditor(
+      programSource,
+      symbolRole !== 'motor' && mouseOperableSymbol(symbolDefinitions?.[selectedType], symbolRole),
+      symbolName,
+      symbolRole
+    );
+    const saved = {
       type: selectedType,
       name: symbolName,
       prefix: symbolPrefix,
       category: symbolCategory,
-      role: symbolRole,
-      io: symbolIo,
       width: Number(symbolWidth),
       height: Number(symbolHeight),
       pinRadius,
-      pins,
-      pinLinks: livePinLinks(pins, pinLinks),
+      pins: pinsForDrawing(pins),
+      program: nextProgram,
       primitives: restPrimitives,
       activePrimitives,
-      layers,
-      defaultState: { on: false }
-    });
+      layers
+    };
+    if (symbolCategory === SWITCH_GROUP) saved.momentary = actuation === 'momentary';
+    saveCustomSymbol(saved);
+    programKeyRef.current = programLogicKey(nextProgram);
     onSymbolsUpdated();
+    if (!announce) return;
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 2000);
+  };
+
+  const handleSave = () => writeSymbol(program, true);
+
+  const handleProgramChange = (next) => {
+    const operable = symbolRole !== 'motor' && symbolRole !== 'source' && mouseOperableSymbol(defsRef.current?.[selectedType], symbolRole);
+    const wrapped = programForEditor(next, operable, symbolName, symbolRole);
+    setProgram(wrapped);
+    if (programLogicKey(wrapped) === programKeyRef.current) return;
+    writeSymbol(wrapped, false);
   };
 
   const handleResetToDefault = () => {
@@ -223,14 +302,25 @@ export default function SymbolEditorModal({
       setSymbolName(catalog.name || 'Componente');
       setSymbolPrefix(catalog.prefix || 'K');
       setSymbolCategory(catalog.category || 'Personalizados');
+      setSymbolActuation(pushbuttonActuation(catalog));
       setSymbolRole(catalog.role || 'switch');
-      setSymbolIo(ioOf(catalog));
       setSymbolWidth(catalog.width || 40);
       setSymbolHeight(catalog.height || 50);
       setPinRadius(catalog.pinRadius ?? DEFAULT_PIN_RADIUS);
-      const catalogPins = cloneData(catalog.pins || []);
+      const catalogPins = pinsForDrawing(cloneData(catalog.pins || []));
+      const catalogLinks = Array.isArray(catalog.pinLinks) ? cloneData(catalog.pinLinks) : defaultPinLinks(catalogPins);
       setPins(catalogPins);
-      setPinLinks(Array.isArray(catalog.pinLinks) ? cloneData(catalog.pinLinks) : defaultPinLinks(catalogPins));
+      setPinLinks(catalogLinks);
+      const catalogName = catalog.name || 'Componente';
+      symbolNameRef.current = catalogName;
+      const catalogProgram = programForEditor(
+        catalog.program,
+        mouseOperableSymbol(catalog, catalog.role),
+        catalogName,
+        catalog.role
+      );
+      programKeyRef.current = programLogicKey(catalogProgram);
+      setProgram(catalogProgram);
       const defaults = DEFAULT_PRIMITIVES[selectedType];
       const rest = defaults ? cloneData(defaults) : [];
       restSpriteRef.current = rest;
@@ -238,28 +328,32 @@ export default function SymbolEditorModal({
       setPrimitives(rest);
     } else {
       setPinRadius(DEFAULT_PIN_RADIUS);
+      setSymbolRole('switch');
+      setSymbolActuation(symbolCategory === SWITCH_GROUP ? 'momentary' : 'latch');
       setPins(starterPins);
       setPinLinks(defaultPinLinks(starterPins));
+      const blankProgram = programForEditor(emptyProgram(), true, symbolName, 'switch');
+      symbolNameRef.current = symbolName;
+      programKeyRef.current = programLogicKey(blankProgram);
+      setProgram(blankProgram);
       restSpriteRef.current = cloneData(starterPrimitives);
       actuatedSpriteRef.current = [];
       setPrimitives(cloneData(starterPrimitives));
-      saveCustomSymbol({
+      const resetSymbol = {
         type: selectedType,
         name: symbolName,
         prefix: symbolPrefix,
         category: symbolCategory,
-        role: symbolRole,
-        io: symbolIo,
         width: Number(symbolWidth),
         height: Number(symbolHeight),
         pinRadius: DEFAULT_PIN_RADIUS,
         pins: starterPins,
-        pinLinks: defaultPinLinks(starterPins),
         primitives: starterPrimitives,
         activePrimitives: [],
-        layers: cloneData(DEFAULT_LAYERS),
-        defaultState: { on: false }
-      });
+        layers: cloneData(DEFAULT_LAYERS)
+      };
+      if (symbolCategory === SWITCH_GROUP) resetSymbol.momentary = true;
+      saveCustomSymbol(resetSymbol);
     }
     setLayers(cloneData(DEFAULT_LAYERS));
     setSpriteMode('rest');
@@ -287,23 +381,36 @@ export default function SymbolEditorModal({
     <div
       data-symbol-editor
       className={`fixed inset-0 z-50 flex select-none ${
-        isFullscreen ? 'bg-autocad-bg' : 'items-center justify-center bg-black/80 p-3'
+        isFullscreen ? 'h-screen w-screen bg-autocad-bg' : 'items-center justify-center bg-black/80 p-3'
       }`}
     >
       <div
         className={`plan-frame bg-autocad-raised border border-autocad-cyan/50 shadow-2xl flex flex-col text-xs text-autocad-textBright overflow-hidden ${
-          isFullscreen ? 'w-full h-full' : 'w-full max-w-[1360px] h-[92vh] rounded-lg'
+          isFullscreen ? 'h-full w-full max-w-none rounded-none' : 'w-full max-w-[1360px] h-[92vh] rounded-lg'
         }`}
       >
-        <div className="flex items-center justify-between px-3 py-2 border-b border-autocad-border bg-autocad-panel">
+        <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-autocad-border bg-autocad-panel">
           <div className="flex items-center gap-3 min-w-0">
             <span className="px-1.5 py-1 bg-autocad-chip border border-autocad-cyan/50 rounded text-autocad-cyan font-bold">CAD</span>
             <div className="min-w-0">
               <h2 className="font-bold text-autocad-cyan uppercase tracking-wider text-sm truncate">Editor de piezas</h2>
               <p className="text-[10px] text-autocad-textMuted truncate">Lienzo vectorial con snaps, nodos, capas y dos sprites.</p>
             </div>
+            {symbolRole !== 'source' && symbolRole !== 'motor' && (
+              <button
+                type="button"
+                onClick={() => setProgramOpen(true)}
+                className={`shrink-0 px-2.5 py-1 rounded border font-bold tracking-wide ${
+                  programOpen
+                    ? 'bg-autocad-yellow text-autocad-onAccent border-autocad-yellow'
+                    : 'border-autocad-yellow text-autocad-yellow hover:bg-autocad-chipGold'
+                }`}
+              >
+                PROGRAMACIÓN
+              </button>
+            )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button type="button" onClick={handleCreateNewPiece} className="flex items-center gap-1 px-2.5 py-1 bg-blue-950/80 hover:bg-blue-900 border border-blue-500/50 text-blue-300 font-semibold rounded">
               <Plus className="w-3.5 h-3.5" /> Nueva pieza
             </button>
@@ -321,11 +428,11 @@ export default function SymbolEditorModal({
             <button
               type="button"
               onClick={() => setIsFullscreen(value => !value)}
-              className="flex items-center gap-1 px-2.5 py-1 border border-autocad-border rounded text-autocad-textBright hover:border-autocad-cyan hover:text-autocad-cyan"
-              title={isFullscreen ? 'Volver a ventana (F11)' : 'Pantalla completa (F11)'}
+              className="flex items-center gap-1 px-2.5 py-1 border border-autocad-cyan/60 rounded text-autocad-cyan hover:bg-autocad-chip"
+              title={isFullscreen ? 'Restaurar la ventana (F11)' : 'Maximizar el editor (F11)'}
             >
               {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
-              {isFullscreen ? 'Ventana' : 'Pantalla completa'}
+              {isFullscreen ? 'Restaurar' : 'Maximizar'}
             </button>
             <button type="button" onClick={onClose} className="p-1 text-autocad-textMuted hover:text-white hover:bg-red-950/50 rounded">
               <X className="w-4 h-4" />
@@ -447,38 +554,49 @@ export default function SymbolEditorModal({
                   ))}
                 </select>
               </label>
+              {symbolCategory === SWITCH_GROUP && (
+                <div className="space-y-1">
+                  <span className="block text-[10px] text-autocad-textMuted">Estado del interruptor</span>
+                  <div className="grid grid-cols-2 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSymbolActuation('momentary');
+                        writeSymbol(program, false, 'momentary');
+                      }}
+                      className={`px-2 py-1 rounded border font-bold ${
+                        symbolActuation === 'momentary'
+                          ? 'bg-autocad-yellow text-autocad-onAccent border-autocad-yellow'
+                          : 'border-autocad-border text-autocad-textMuted hover:text-white hover:bg-autocad-hover'
+                      }`}
+                    >
+                      Pulsador
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSymbolActuation('latch');
+                        writeSymbol(program, false, 'latch');
+                      }}
+                      className={`px-2 py-1 rounded border font-bold ${
+                        symbolActuation === 'latch'
+                          ? 'bg-autocad-yellow text-autocad-onAccent border-autocad-yellow'
+                          : 'border-autocad-border text-autocad-textMuted hover:text-white hover:bg-autocad-hover'
+                      }`}
+                    >
+                      Botón
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-autocad-textMuted leading-snug">
+                    {symbolActuation === 'momentary'
+                      ? 'Pulsador: se presiona y, al soltar, vuelve a su reposo.'
+                      : 'Botón: se presiona y queda en ese estado.'}
+                  </p>
+                </div>
+              )}
               <label className="block text-[10px] text-autocad-textMuted">Prefijo
                 <input value={symbolPrefix} onChange={(event) => setSymbolPrefix(event.target.value.toUpperCase())} className="mt-0.5 w-full bg-autocad-inset border border-autocad-border rounded px-2 py-1 text-xs text-autocad-yellow font-mono font-bold" />
               </label>
-              <label className="block text-[10px] text-autocad-textMuted">Rol
-                <select
-                  value={symbolRole}
-                  onChange={(event) => {
-                    const role = event.target.value;
-                    setSymbolRole(role);
-                    setSymbolIo(ioOf({ role }));
-                  }}
-                  className="mt-0.5 w-full bg-autocad-inset border border-autocad-border rounded p-1 text-xs text-autocad-green"
-                >
-                  <option value="switch">Interruptor</option>
-                  <option value="coil">Bobina</option>
-                  <option value="contact">Contacto</option>
-                  <option value="load">Piloto / carga</option>
-                  <option value="motor">Motor</option>
-                  <option value="source">Fuente</option>
-                  <option value="passive">Borne pasivo</option>
-                </select>
-              </label>
-              <label className="block text-[10px] text-autocad-textMuted">Dirección
-                <select value={symbolIo} onChange={(event) => setSymbolIo(event.target.value)} className="mt-0.5 w-full bg-autocad-inset border border-autocad-border rounded p-1 text-xs text-autocad-yellow">
-                  <option value="in">IN — la accionas con el clic</option>
-                  <option value="out">OUT — solo la acciona el circuito</option>
-                  <option value="inout">IN-OUT — clic y circuito</option>
-                </select>
-              </label>
-              <p className="text-[10px] leading-snug text-autocad-textMuted">
-                Una bobina es OUT: el clic no la fuerza. Un pulsador es IN: el clic sí lo acciona. IN-OUT acepta las dos cosas.
-              </p>
               <div className="grid grid-cols-2 gap-2">
                 <label className="text-[10px] text-autocad-textMuted">Ancho
                   <input type="number" value={symbolWidth} onChange={(event) => setSymbolWidth(Number(event.target.value))} className="mt-0.5 w-full bg-autocad-inset border border-autocad-border rounded px-2 py-1 font-mono" />
@@ -530,57 +648,6 @@ export default function SymbolEditorModal({
               </div>
             </div>
 
-            <div className="space-y-2 border-b border-autocad-border pb-3">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-autocad-green uppercase text-[11px]">Conexiones</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const from = pins[0]?.id || '';
-                    const to = pins.find(pin => pin.id !== from)?.id || '';
-                    setPinLinks(prev => [...livePinLinks(pins, prev), { id: `link_${Date.now().toString(36)}`, from, to }]);
-                  }}
-                  className="px-2 py-0.5 bg-autocad-chipLive border border-autocad-green/40 text-autocad-green rounded text-[10px]"
-                >
-                  + Camino
-                </button>
-              </div>
-              <p className="text-[10px] text-autocad-textMuted leading-snug">
-                Elige el borne de entrada y el de salida. Cuando la pieza conduce, ese camino queda unido. La línea verde del lienzo muestra el recorrido.
-              </p>
-              <div className="grid grid-cols-[1fr_1fr_16px] gap-1 text-[9px] uppercase text-autocad-textMuted">
-                <span>Entrada</span>
-                <span>Salida</span>
-                <span />
-              </div>
-              <div className="space-y-1 max-h-36 overflow-y-auto">
-                {livePinLinks(pins, pinLinks).map(link => (
-                  <div key={link.id} className="grid grid-cols-[1fr_1fr_16px] gap-1 items-center">
-                    <select
-                      value={link.from}
-                      onChange={(event) => setPinLinks(prev => livePinLinks(pins, prev).map(item => item.id === link.id ? { ...item, from: event.target.value } : item))}
-                      className="bg-autocad-inset border border-autocad-border rounded px-1 py-1 text-[10px] text-autocad-cyan font-mono"
-                    >
-                      {pins.map(pin => <option key={pin.id} value={pin.id}>{pin.label || pin.id}</option>)}
-                    </select>
-                    <select
-                      value={link.to}
-                      onChange={(event) => setPinLinks(prev => livePinLinks(pins, prev).map(item => item.id === link.id ? { ...item, to: event.target.value } : item))}
-                      className="bg-autocad-inset border border-autocad-border rounded px-1 py-1 text-[10px] text-autocad-green font-mono"
-                    >
-                      {pins.map(pin => <option key={pin.id} value={pin.id}>{pin.label || pin.id}</option>)}
-                    </select>
-                    <button type="button" title="Quitar camino" onClick={() => setPinLinks(prev => prev.filter(item => item.id !== link.id))} className="text-autocad-textMuted hover:text-red-400">
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
-                {livePinLinks(pins, pinLinks).length === 0 && (
-                  <p className="text-[10px] text-autocad-textMuted">Sin caminos. La pieza no une bornes por dentro.</p>
-                )}
-              </div>
-            </div>
-
             {activeNode && (
               <div className="space-y-2 border-b border-autocad-border pb-3">
                 <span className="font-bold text-white uppercase text-[11px]">Nodo {editor.selectedNode.index + 1}</span>
@@ -608,6 +675,16 @@ export default function SymbolEditorModal({
           </div>
         </div>
       </div>
+      <BlockProgramWindow
+        open={programOpen && symbolRole !== 'source' && symbolRole !== 'motor'}
+        title={symbolName}
+        pins={pins}
+        program={program}
+        actuated={spriteMode === 'actuated'}
+        onChange={handleProgramChange}
+        onSave={handleSave}
+        onClose={() => setProgramOpen(false)}
+      />
     </div>
   );
 }

@@ -1,11 +1,16 @@
 // Symbol catalog with IEC 60617 / DIN standard electrical symbols
 // Designed for AutoCAD dark-mode rendering and DXF vector export
 
+export const SWITCH_GROUP = 'Interruptores y Botoneras';
+export const CONTROL_GROUP = 'Maniobra y control';
+
 export const CATEGORIES = [
   'Lo más usado',
   'Potenciales y Señales',
   'Protección Eléctrica',
   'Mandos y Actuadores',
+  SWITCH_GROUP,
+  CONTROL_GROUP,
   'Cargas y Motores',
 ];
 
@@ -19,7 +24,7 @@ function poleCenters(count) {
 
 // Circle with a stem. The label sits above the circle. Each stem is a
 // connection pin that feeds live, neutral or earth into the solver.
-function definePotential({ type, name, prefix, voltage, poles, earth = false }) {
+function definePotential({ type, name, prefix, voltage, poles, earth = false, program = null }) {
   const figures = { circles: [], lines: [], texts: [] };
   let pins = [];
   let width = 30;
@@ -135,9 +140,41 @@ function definePotential({ type, name, prefix, voltage, poles, earth = false }) 
         ctx.fillText(text.text, text.x, text.y);
       });
       ctx.restore();
-    }
+    },
+    ...(program ? { program } : {})
   };
 }
+
+// Voltage sources carry their potential in the symbol itself. They are not
+// block-programmed. The contactor coil does not bridge A1 to A2. RETRO is
+// left unwired so the seal-in is optional.
+const CONTACTOR_COIL_PROGRAM = {
+  blocks: [
+    { id: 'coil_a1', type: 'input', x: 40, y: 40, value: '', name: '', pinId: 'A1', rare: false },
+    { id: 'coil_retro', type: 'var', x: 40, y: 180, value: '', name: 'RETRO', pinId: '', rare: false },
+    { id: 'coil_or', type: 'or', x: 280, y: 80, value: '', name: '', pinId: '', rare: false },
+    { id: 'coil_a2', type: 'input', x: 40, y: 320, value: '', name: '', pinId: 'A2', rare: false },
+    { id: 'coil_and', type: 'and', x: 520, y: 160, value: '', name: '', pinId: '', rare: false },
+    { id: 'coil_bobina', type: 'output', x: 760, y: 160, value: '', name: 'Bobina', pinId: '', rare: true }
+  ],
+  wires: [
+    { id: 'coil_w_a1', from: { blockId: 'coil_a1', port: 'out' }, to: { blockId: 'coil_or', port: 'a' } },
+    { id: 'coil_w_retro', from: { blockId: 'coil_retro', port: 'out' }, to: { blockId: 'coil_or', port: 'b' } },
+    { id: 'coil_w_or', from: { blockId: 'coil_or', port: 'out' }, to: { blockId: 'coil_and', port: 'a' } },
+    { id: 'coil_w_a2', from: { blockId: 'coil_a2', port: 'out' }, to: { blockId: 'coil_and', port: 'b' } },
+    { id: 'coil_w_out', from: { blockId: 'coil_and', port: 'out' }, to: { blockId: 'coil_bobina', port: 'in' } }
+  ]
+};
+
+// The metal contact follows the coil of the same tag. RETRO is only the
+// optional seal-in: it stays unwired until the user joins the entrada to it.
+const CONTACTOR_CONTACT_PROGRAM = {
+  blocks: [
+    { id: 'ct_in', type: 'input', x: 40, y: 80, value: '', name: '', pinId: '13', rare: false },
+    { id: 'ct_retro', type: 'var', x: 40, y: 220, value: '', name: 'RETRO', pinId: '', rare: false }
+  ],
+  wires: []
+};
 
 const phase = (index) => ({ id: `L${index}`, label: `L${index}`, potential: 'live' });
 const neutralPole = (id, label) => ({ id, label, potential: 'neutral' });
@@ -648,6 +685,7 @@ export const SYMBOL_DEFINITIONS = {
     io: 'out',
     pinRadius: 1.6,
     pinLinks: [],
+    program: CONTACTOR_COIL_PROGRAM,
     pins: [
       { id: 'A1', label: 'A1', x: 0, y: -25 },
       { id: 'A2', label: 'A2', x: 0, y: 25 }
@@ -692,6 +730,7 @@ export const SYMBOL_DEFINITIONS = {
     pinLinks: [
       { id: 'link_13_14', from: '13', to: '14' }
     ],
+    program: CONTACTOR_CONTACT_PROGRAM,
     pins: [
       { id: '13', label: '13', x: 0, y: -25 },
       { id: '14', label: '14', x: 0, y: 25 }
@@ -1047,17 +1086,6 @@ export const SYMBOL_DEFINITIONS = {
       ctx.fillText('M', 0, -2);
       ctx.font = '9px Consolas';
       ctx.fillText('3 ~', 0, 10);
-
-      // Rotation indication if running
-      if (isRunning) {
-        ctx.save();
-        ctx.strokeStyle = '#ffd600';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(0, 0, 22, -0.2 * Math.PI, 0.4 * Math.PI);
-        ctx.stroke();
-        ctx.restore();
-      }
 
       ctx.fillStyle = '#81d4fa';
       ctx.font = '8px Consolas';

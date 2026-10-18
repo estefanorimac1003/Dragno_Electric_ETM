@@ -1,7 +1,11 @@
-import { symbolSprite, symbolHitBox } from './symbolStore';
+import { symbolSprite } from './symbolStore';
 import { layerState, outlineSegments } from './draw/geometry';
 import { SYMBOL_DEFINITIONS } from './symbolCatalog';
-import { normalizeRotation, rotateOffset, rotatedBounds } from './componentPose';
+import { normalizeRotation, rotateOffset } from './componentPose';
+import { componentLabels, nameLinePositions } from './componentLabel';
+import { negationMarks } from './outputNot.js';
+import { motorArrowGeometry, motorTurnOf } from './motorTurn.js';
+import { junctionPoints } from './wireGeometry';
 
 // Industrial DXF Generator conforming to AutoCAD DXF standard (Release 12 / R2000 ASCII)
 // Exports layers, line entities, circles, arcs, and text with exact coordinates and colors
@@ -78,7 +82,7 @@ export function generateDxf(sheetData, options = {}) {
     dxf += `40\n${Number(r).toFixed(2)}\n`;
   };
 
-  const addText = (text, x, y, height = 3.5, layer = 'ESQ_TEXTOS', color = null) => {
+  const addText = (text, x, y, height = 3.5, layer = 'ESQ_TEXTOS', color = null, align = 'left') => {
     if (!text) return;
     dxf += '0\nTEXT\n';
     dxf += `8\n${layer}\n`;
@@ -88,6 +92,12 @@ export function generateDxf(sheetData, options = {}) {
     dxf += '30\n0.0\n';
     dxf += `40\n${Number(height).toFixed(2)}\n`;
     dxf += `1\n${text}\n`;
+    if (align === 'right' || align === 'center') {
+      dxf += `72\n${align === 'center' ? 1 : 2}\n`;
+      dxf += `11\n${toCadX(x)}\n`;
+      dxf += `21\n${toCadY(y)}\n`;
+      dxf += '31\n0.0\n';
+    }
   };
 
   // --- DRAW SHEET BORDER & TITLE BLOCK ---
@@ -131,6 +141,10 @@ export function generateDxf(sheetData, options = {}) {
     }
   });
 
+  junctionPoints(wires).forEach(point => {
+    addCircle(point.x, point.y, 2.5, 'ESQ_CABLES_CONTROL', 4);
+  });
+
   // --- DRAW COMPONENTS ---
   const placeLine = addLine;
   const placeCircle = addCircle;
@@ -158,8 +172,31 @@ export function generateDxf(sheetData, options = {}) {
       placeText(text, point.x, point.y, height, layer, color);
     };
     const def = (options.symbolDefs && options.symbolDefs[comp.type]) || SYMBOL_DEFINITIONS[comp.type];
-    const spun = rotatedBounds(symbolHitBox(def), rotation);
-    placeText(tag, cx + (spun.minX + spun.maxX) / 2, cy + spun.minY - 8, 3.5, 'ESQ_TEXTOS', 2);
+    const labels = componentLabels(comp, def);
+    placeText(labels.tag, labels.tagX, labels.tagY, 3.5, 'ESQ_TEXTOS', 2, 'right');
+    const nameLayout = nameLinePositions(comp, def);
+    nameLayout.lines.forEach(line => {
+      if (!line.text) return;
+      const height = Math.max(1.6, nameLayout.style.size / 4);
+      const align = nameLayout.style.align;
+      placeText(line.text, line.x, line.y, height, 'ESQ_TEXTOS', 7, align);
+      if (nameLayout.style.bold) placeText(line.text, line.x + 0.35, line.y, height, 'ESQ_TEXTOS', 7, align);
+    });
+
+    negationMarks(comp, def).forEach(mark => {
+      addCircle(cx + mark.x, cy + mark.y, mark.r, 'ESQ_SIMBOLOS', 2);
+    });
+    if (def?.role === 'motor') {
+      const arrow = motorArrowGeometry(motorTurnOf(comp));
+      for (let index = 0; index < arrow.points.length - 1; index += 1) {
+        const from = arrow.points[index];
+        const to = arrow.points[index + 1];
+        addLine(cx + from.x, cy + from.y, cx + to.x, cy + to.y, 'ESQ_SIMBOLOS', 2);
+      }
+      const [tip, left, right] = arrow.head;
+      addLine(cx + tip.x, cy + tip.y, cx + left.x, cy + left.y, 'ESQ_SIMBOLOS', 2);
+      addLine(cx + tip.x, cy + tip.y, cx + right.x, cy + right.y, 'ESQ_SIMBOLOS', 2);
+    }
 
     const customDef = options.symbolDefs ? options.symbolDefs[comp.type] : null;
     const sprite = customDef ? symbolSprite(customDef, comp) : null;

@@ -1,8 +1,9 @@
 import React from 'react';
 import { X, FileSpreadsheet, CheckCircle2, Zap } from 'lucide-react';
 import { SYMBOL_DEFINITIONS } from '../cad/symbolCatalog';
+import { componentName } from '../cad/componentLabel';
 
-export default function DeviceListModal({ isOpen, onClose, sheets, isSimulating, energizedById = {} }) {
+export default function DeviceListModal({ isOpen, onClose, sheets, isSimulating, energizedById = {}, symbolDefs = SYMBOL_DEFINITIONS }) {
   if (!isOpen) return null;
 
   // Flatten all devices across sheets
@@ -10,14 +11,15 @@ export default function DeviceListModal({ isOpen, onClose, sheets, isSimulating,
 
   sheets.forEach(sheet => {
     (sheet.components || []).forEach(comp => {
-      const def = SYMBOL_DEFINITIONS[comp.type];
+      const def = symbolDefs[comp.type] || SYMBOL_DEFINITIONS[comp.type];
       const tag = comp.tag || comp.type;
+      const name = componentName(comp, def).replace(/\n/g, ' ');
 
       if (!deviceMap.has(tag)) {
         deviceMap.set(tag, {
           tag,
           type: comp.type,
-          name: def?.name || comp.type,
+          names: [],
           role: def?.role || 'general',
           count: 0,
           sheets: new Set(),
@@ -26,6 +28,7 @@ export default function DeviceListModal({ isOpen, onClose, sheets, isSimulating,
       }
 
       const item = deviceMap.get(tag);
+      if (name && !item.names.includes(name)) item.names.push(name);
       item.count += 1;
       item.sheets.add(sheet.title);
       if (comp.energized || energizedById[comp.id]) item.energized = true;
@@ -76,7 +79,7 @@ export default function DeviceListModal({ isOpen, onClose, sheets, isSimulating,
                   <td className="p-2 border-r border-autocad-border font-mono font-bold text-autocad-yellow">
                     {dev.tag}
                   </td>
-                  <td className="p-2 border-r border-autocad-border">{dev.name}</td>
+                  <td className="p-2 border-r border-autocad-border">{dev.names.join(' · ')}</td>
                   <td className="p-2 border-r border-autocad-border font-mono text-center">{dev.count}</td>
                   <td className="p-2 border-r border-autocad-border text-[10px] text-autocad-textMuted">
                     {Array.from(dev.sheets).join(', ')}

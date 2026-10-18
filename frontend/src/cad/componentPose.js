@@ -54,11 +54,12 @@ export function nominalBox(def) {
 }
 
 // Keep each cable end on the terminal it was tied to.
+// A hand-routed cable, or one that already has a junction, keeps its corners.
 export function reanchorWire(wire, components, definitionFor) {
-  if (!wire?.from || !wire?.to || !Array.isArray(wire.waypoints) || wire.waypoints.length < 2) return wire;
+  if (!Array.isArray(wire?.waypoints) || wire.waypoints.length < 2) return wire;
 
-  const fromComp = components.find(comp => comp.id === wire.from.compId);
-  const toComp = components.find(comp => comp.id === wire.to.compId);
+  const fromComp = wire.from?.compId ? components.find(comp => comp.id === wire.from.compId) : null;
+  const toComp = wire.to?.compId ? components.find(comp => comp.id === wire.to.compId) : null;
   const fromPin = fromComp
     ? (definitionFor(fromComp)?.pins || []).find(pin => pin.id === wire.from.pinId)
     : null;
@@ -75,7 +76,7 @@ export function reanchorWire(wire, components, definitionFor) {
   if (start) waypoints[0] = { x: start.x, y: start.y };
   if (end) waypoints[waypoints.length - 1] = { x: end.x, y: end.y };
 
-  if (oldMiddle && start && end) {
+  if (!wire.manual && oldMiddle && start && end && waypoints.length === 3) {
     const verticalFirst = Math.abs(oldMiddle.x - oldStart.x) <= Math.abs(oldMiddle.y - oldStart.y);
     waypoints[1] = verticalFirst
       ? { x: waypoints[0].x, y: waypoints[2].y }

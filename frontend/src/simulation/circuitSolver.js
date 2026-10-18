@@ -4,7 +4,13 @@
 import { SYMBOL_DEFINITIONS } from '../cad/symbolCatalog';
 import { conductingPairs } from '../cad/pinLinks';
 import { isCustomDrawn } from '../cad/symbolStore';
-import { ioOf } from '../cad/ioKind';
+import { ioOf, mouseActuated, userCanOperate } from '../cad/ioKind';
+import { deviceIsNegated, pinIsNegated } from '../cad/outputNot';
+import { evaluateProgram, hasBlockProgram, programOwnedPins, programWiresHand, withActuatedBlock } from '../cad/blockProgram';
+import { componentName } from '../cad/componentLabel';
+import { bondWireNets, wireNodeKeys } from '../cad/wireGeometry';
+import { motorPhasePins, motorTurnOf, oppositeTurn, phaseSequence } from '../cad/motorTurn';
+import { isMomentaryPushbutton } from '../cad/pushbutton';
 
 const MAX_ITERATIONS = 16;
 
@@ -18,6 +24,13 @@ function isThermal(def) {
 
 function tagOf(comp) {
   return String(comp?.tag || '').trim().toUpperCase();
+}
+
+function sourcePhase(pin) {
+  const id = String(pin?.id || '');
+  if (id === 'L1' || id === 'L2' || id === 'L3') return id;
+  if (pin?.potential === 'live') return 'L';
+  return null;
 }
 
 function pinById(def, id, fallbackIndex) {
@@ -37,7 +50,8 @@ function isConducting(comp, def) {
   if (isCustomDrawn(def)) {
     if (def.role === 'passive') return true;
     if (def.role === 'source' || def.role === 'coil' || def.role === 'load' || def.role === 'motor') return false;
-    if (ioOf(def) === 'out') return def.contactType === 'NC' ? state.closed !== false : !!state.closed;
+    if (ioOf(def, comp) === 'out') return def.contactType === 'NC' ? state.closed !== false : !!state.closed;
+    if (isMomentaryPushbutton(def)) return !!(state.pressed || state.forced);
     return !!(state.on || state.pressed || state.forced);
   }
 
@@ -75,6 +89,13 @@ function bridgesPins(def) {
   return def?.role === 'switch' || def?.role === 'contact' || def?.role === 'passive';
 }
 
+// Coils, lamps, motors and sources do not pass a pole through to another pole.
+function conductsAcross(def) {
+  if (!def) return false;
+  if (def.role === 'coil' || def.role === 'load' || def.role === 'motor' || def.role === 'source') return false;
+  return bridgesPins(def);
+}
+
 /**
  * Solve the whole project, not a single sheet.
  * priorStates keeps the last contact positions so a seal-in (enclavamiento)
@@ -92,11 +113,14 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
       state.closed = prior.closed;
     }
 
-    compMap.set(comp.id, {
+    const copy = {
       ...comp,
       state,
       energized: false
-    });
+    };
+    // Hand state, before a same-tag follower copies state.on onto this piece.
+    copy.actuated = mouseActuated(copy, def);
+    compMap.set(comp.id, copy);
   });
 
   const wireList = Array.isArray(wires) ? wires : [];
@@ -118,10 +142,23 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
     comp.state.tripped = true;
   });
 
+  // The hand that turned a piece on. Later passes must not treat a follower
+  // copy of that state as a new hand, or the tag would latch itself.
+  const userActuated = new Set();
+  compMap.forEach(comp => {
+    const def = definitionFor(comp, symbolDefs);
+    const state = comp.state || {};
+    if (!userCanOperate(def, comp)) return;
+    if (state.forced || state.pressed) userActuated.add(comp.id);
+    else if (state.on && !isMomentaryPushbutton(def)) userActuated.add(comp.id);
+  });
+
   let changed = true;
   let iterations = 0;
   let isPinLive = () => false;
   let isPinNeutral = () => false;
+  let wireIsLive = () => false;
+  let phaseAt = () => null;
 
   while (changed && iterations < MAX_ITERATIONS) {
     changed = false;
@@ -141,129 +178,321 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
       if (rootA !== rootB) parent.set(rootA, rootB);
     };
 
-    wireList.forEach(wire => {
-      if (!wire?.from || !wire?.to) return;
-      union(
-        pinKey(wire.from.compId, wire.from.pinId),
-        pinKey(wire.to.compId, wire.to.pinId)
-      );
-    });
+    bondWireNets(wireList, union, pinKey);
 
+    // A normal output joins its pins while the contact conducts.
+    // A negated output waits until that path already has potential.
     compMap.forEach(comp => {
       const def = definitionFor(comp, symbolDefs);
-      if (!def || !bridgesPins(def) || !isConducting(comp, def)) return;
+      if (!def || !conductsAcross(def) || !isConducting(comp, def)) return;
+      // The block wires are the only path. Pairing the bornes in order would
+      // join two phase inputs and the motor would see a short.
+      if (def.role !== 'contact' && hasBlockProgram(def)) return;
+      const owned = programOwnedPins(def);
       conductingPairs(def).forEach(([a, b]) => {
+        // A contactor contact follows its coil. Its program must not take the poles.
+        if (def.role !== 'contact' && (owned.has(a) || owned.has(b))) return;
+        if (pinIsNegated(comp, def, a) || pinIsNegated(comp, def, b)) return;
         union(pinKey(comp.id, a), pinKey(comp.id, b));
       });
     });
 
     const liveRoots = new Set();
     const neutralRoots = new Set();
+    const phaseRoots = new Map();
+    const markPotentials = () => {
+      liveRoots.clear();
+      neutralRoots.clear();
+      phaseRoots.clear();
+      compMap.forEach(comp => {
+        const def = definitionFor(comp, symbolDefs);
+        if (!def || def.role !== 'source') return;
 
-    compMap.forEach(comp => {
-      const def = definitionFor(comp, symbolDefs);
-      if (!def || def.role !== 'source') return;
-
-      (def.pins || []).forEach(pin => {
-        let kind = pin.potential || null;
-        if (!kind && def.potentialType === 'dc_supply') {
-          kind = pin.id === 'POS' || pin.label === '+' ? 'live' : 'neutral';
-        } else if (!kind) {
-          kind = def.potentialType === 'live'
-            ? 'live'
-            : def.potentialType === 'neutral' || def.potentialType === 'ground'
-              ? def.potentialType
-              : null;
-        }
-        const root = find(pinKey(comp.id, pin.id));
-        if (kind === 'live') liveRoots.add(root);
-        else if (kind === 'neutral' || kind === 'ground') neutralRoots.add(root);
+        (def.pins || []).forEach(pin => {
+          if (pinIsNegated(comp, def, pin.id)) return;
+          let kind = pin.potential || null;
+          if (!kind && def.potentialType === 'dc_supply') {
+            kind = pin.id === 'POS' || pin.label === '+' ? 'live' : 'neutral';
+          } else if (!kind) {
+            kind = def.potentialType === 'live'
+              ? 'live'
+              : def.potentialType === 'neutral' || def.potentialType === 'ground'
+                ? def.potentialType
+                : null;
+          }
+          const root = find(pinKey(comp.id, pin.id));
+          if (kind === 'live') {
+            liveRoots.add(root);
+            const phase = sourcePhase(pin);
+            if (phase) {
+              const names = phaseRoots.get(root) || new Set();
+              names.add(phase);
+              phaseRoots.set(root, names);
+            }
+          } else if (kind === 'neutral' || kind === 'ground') neutralRoots.add(root);
+        });
       });
-    });
+    };
 
     isPinLive = (compId, pinId) => !!pinId && liveRoots.has(find(pinKey(compId, pinId)));
     isPinNeutral = (compId, pinId) => !!pinId && neutralRoots.has(find(pinKey(compId, pinId)));
+    wireIsLive = (wire) => wireNodeKeys(wire, pinKey).some(key => liveRoots.has(find(key)));
+    phaseAt = (compId, pinId) => {
+      if (!pinId) return null;
+      const names = phaseRoots.get(find(pinKey(compId, pinId)));
+      if (!names || names.size !== 1) return null;
+      const [name] = names;
+      return name === 'L1' || name === 'L2' || name === 'L3' ? name : null;
+    };
+    markPotentials();
 
-    const activeTags = new Set();
+    const pairFed = (compId, a, b) => (
+      isPinLive(compId, a) || isPinNeutral(compId, a) ||
+      isPinLive(compId, b) || isPinNeutral(compId, b)
+    );
 
-    compMap.forEach(comp => {
-      const def = definitionFor(comp, symbolDefs);
-      if (!def) return;
+    // One negated output passes only when its own path is already fed
+    // and the mechanical contact is open. Another output stays as drawn.
+    let negatedGrew = true;
+    let negatedPass = 0;
+    while (negatedGrew && negatedPass < compMap.size + 1) {
+      negatedGrew = false;
+      negatedPass += 1;
+      compMap.forEach(comp => {
+        const def = definitionFor(comp, symbolDefs);
+        if (!def || !conductsAcross(def) || isConducting(comp, def)) return;
+        if (def.role !== 'contact' && hasBlockProgram(def)) return;
+        const owned = programOwnedPins(def);
+        conductingPairs(def).forEach(([a, b]) => {
+          if (def.role !== 'contact' && (owned.has(a) || owned.has(b))) return;
+          if (!(pinIsNegated(comp, def, a) || pinIsNegated(comp, def, b)) || !pairFed(comp.id, a, b)) return;
+          const left = pinKey(comp.id, a);
+          const right = pinKey(comp.id, b);
+          if (find(left) === find(right)) return;
+          union(left, right);
+          negatedGrew = true;
+        });
+      });
+      if (negatedGrew) markPotentials();
+    }
 
-      let newlyEnergized = false;
+    // A piece with a source on one of its bornes runs its program and may
+    // repeat that voltage. A loose piece has nothing to send.
+    const powerStamp = () => Array.from(compMap.values()).map(comp => (
+      `${comp.id}:${comp.energized ? 1 : 0}:${comp.state?.closed ? 1 : 0}:${comp.state?.tripped ? 1 : 0}:${(comp.programOutputs || []).join('.')}:${(comp.programRares || []).map(item => item.name).join('.')}`
+    )).join('|');
+    const beforePower = powerStamp();
 
+    const refreshPowerStates = () => {
+      const activeTags = new Set();
+      compMap.forEach(comp => {
+        const def = definitionFor(comp, symbolDefs);
+        if (!def) return;
+
+        let newlyEnergized = false;
+        const wholeNegated = deviceIsNegated(comp, def);
+        const liveOn = (pinId) => {
+          if (!wholeNegated && pinIsNegated(comp, def, pinId)) return false;
+          return isPinLive(comp.id, pinId);
+        };
+        const neutralOn = (pinId) => {
+          if (!wholeNegated && pinIsNegated(comp, def, pinId)) return false;
+          return isPinNeutral(comp.id, pinId);
+        };
+
+        if (def.role === 'coil') {
+          const a1 = pinById(def, 'A1', 0);
+          const a2 = pinById(def, 'A2', 1);
+          const byTerminals = (liveOn(a1) && neutralOn(a2)) || (liveOn(a2) && neutralOn(a1));
+          const byProgram = (comp.programRares || []).some(item => item.on !== false);
+          newlyEnergized = byTerminals || byProgram;
+        } else if (def.role === 'load') {
+          const x1 = pinById(def, 'X1', 0);
+          const x2 = pinById(def, 'X2', 1);
+          newlyEnergized = (liveOn(x1) && neutralOn(x2)) || (liveOn(x2) && neutralOn(x1));
+        } else if (def.role === 'motor') {
+          comp.spin = null;
+          comp.sequence = null;
+          const phasePins = motorPhasePins(def);
+          if (phasePins) {
+            const sequence = phaseSequence(
+              phaseAt(comp.id, phasePins[0]),
+              phaseAt(comp.id, phasePins[1]),
+              phaseAt(comp.id, phasePins[2])
+            );
+            newlyEnergized = !!sequence;
+            comp.sequence = sequence;
+          }
+        }
+
+        if ((def.role === 'coil' || def.role === 'load' || def.role === 'motor') && wholeNegated) {
+          const fed = (def.pins || []).some(pin => isPinLive(comp.id, pin.id) || isPinNeutral(comp.id, pin.id));
+          newlyEnergized = fed ? !newlyEnergized : false;
+        }
+
+        if (ioOf(def, comp) === 'inout' && comp.state?.forced) newlyEnergized = true;
+        if (
+          ioOf(def, comp) === 'in'
+          && comp.state?.on
+          && (def.role === 'coil' || def.role === 'load' || def.role === 'motor')
+        ) {
+          newlyEnergized = true;
+        }
+        comp.energized = newlyEnergized;
+        if (def.role === 'motor') {
+          if (!comp.energized) {
+            comp.spin = null;
+            comp.sequence = null;
+          } else if (comp.sequence === 'reverse') {
+            comp.spin = oppositeTurn(comp.turn);
+          } else {
+            comp.spin = motorTurnOf(comp);
+          }
+        }
+
+        const tag = tagOf(comp);
+        if (!tag || def.role === 'source' || isThermal(def)) return;
+        const powered = (def.role === 'coil' || def.role === 'load' || def.role === 'motor') && comp.energized;
+        if (powered || userActuated.has(comp.id)) activeTags.add(tag);
+      });
+
+      // One tag is one device. The part that is on moves the other parts.
+      // A contact that merely stayed closed does not keep the device on.
+      compMap.forEach(comp => {
+        const def = definitionFor(comp, symbolDefs);
+        if (!def || def.role === 'source' || isThermal(def)) return;
+        const tag = tagOf(comp);
+        const tagActive = !!tag && activeTags.has(tag);
+        const normallyClosed = def.contactType === 'NC' || def.switchType === 'momentary_NC';
+
+        if ((def.role === 'coil' || def.role === 'load' || def.role === 'motor') && tagActive) {
+          comp.energized = true;
+          if (def.role === 'motor' && !comp.spin) comp.spin = motorTurnOf(comp);
+        }
+
+        if ((def.role !== 'contact' && def.role !== 'switch') || !tag) return;
+
+        if (def.role === 'contact') {
+          let nextClosed = normallyClosed ? !tagActive : tagActive;
+          if (ioOf(def, comp) === 'in' && comp.state?.on) {
+            nextClosed = !normallyClosed;
+          }
+          if (ioOf(def, comp) === 'inout' && comp.state?.forced) {
+            nextClosed = normallyClosed ? false : true;
+          }
+          comp.state.closed = nextClosed;
+          return;
+        }
+
+        if (userActuated.has(comp.id)) return;
+        comp.state.closed = tagActive ? !normallyClosed : normallyClosed;
+        comp.state.on = tagActive ? !normallyClosed : false;
+      });
+    };
+
+    // Names such as RETRO are shared by every piece that carries the same tag.
+    // A false variable must not clear a true one written by another piece.
+    let sharedByTag = new Map();
+    const tagVarSig = (map) => [...map.entries()]
+      .sort((left, right) => left[0].localeCompare(right[0]))
+      .map(([tag, names]) => `${tag}:${[...names].sort().join(',')}`)
+      .join('|');
+
+    const pinFeedsProgram = (comp, def, pinId) => {
+      if (!pinId) return false;
       if (def.role === 'coil') {
         const a1 = pinById(def, 'A1', 0);
         const a2 = pinById(def, 'A2', 1);
-        const a1Live = isPinLive(comp.id, a1);
-        const a2Live = isPinLive(comp.id, a2);
-        const a1Neutral = isPinNeutral(comp.id, a1);
-        const a2Neutral = isPinNeutral(comp.id, a2);
-        newlyEnergized = (a1Live && a2Neutral) || (a2Live && a1Neutral);
-      } else if (def.role === 'load') {
-        const x1 = pinById(def, 'X1', 0);
-        const x2 = pinById(def, 'X2', 1);
-        const x1Live = isPinLive(comp.id, x1);
-        const x2Live = isPinLive(comp.id, x2);
-        const x1Neutral = isPinNeutral(comp.id, x1);
-        const x2Neutral = isPinNeutral(comp.id, x2);
-        newlyEnergized = (x1Live && x2Neutral) || (x2Live && x1Neutral);
-      } else if (def.role === 'motor') {
-        const u = isPinLive(comp.id, pinById(def, 'U1', 0));
-        const v = isPinLive(comp.id, pinById(def, 'V1', 1));
-        const w = isPinLive(comp.id, pinById(def, 'W1', 2));
-        const liveCount = [u, v, w].filter(Boolean).length;
-        newlyEnergized = liveCount >= 2;
+        if (pinId === a2 && a2 !== a1) return isPinNeutral(comp.id, pinId);
+        if (pinId === a1) return isPinLive(comp.id, pinId);
       }
+      return isPinLive(comp.id, pinId);
+    };
 
-      if (ioOf(def) === 'inout' && comp.state?.forced) newlyEnergized = true;
+    const applyPrograms = () => {
+      let grew = false;
+      let emissionChanged = false;
+      const usedSig = tagVarSig(sharedByTag);
+      const written = new Map();
+      compMap.forEach(comp => {
+        const def = definitionFor(comp, symbolDefs);
+        // A source already carries its potential. A motor follows the phase
+        // sequence on U1, V1 and W1. Neither one is a block program.
+        if (!def || def.role === 'source' || def.role === 'motor' || !hasBlockProgram(def)) {
+          comp.programOutputs = [];
+          comp.programRares = [];
+          comp.programNote = '';
+          return;
+        }
+        const tag = tagOf(comp);
+        const sharedNames = tag ? sharedByTag.get(tag) : null;
+        const operable = userCanOperate(def, comp);
+        const handInProgram = programWiresHand(def.program);
+        const result = evaluateProgram(
+          operable ? withActuatedBlock(def.program, componentName(comp, def)) : def.program,
+          {
+            pins: def.pins,
+            bindOpenPins: def.role === 'switch' || def.role === 'contact' || def.role === 'passive',
+            // A graph that already wires the name block uses that block as the
+            // mouse. The Entrada remains the borne, so the sheet runs the program.
+            engaged: !handInProgram && (def.role === 'switch' || def.role === 'contact')
+              ? isConducting(comp, def)
+              : undefined,
+            actuated: comp.actuated === true,
+            sharedVars: sharedNames && sharedNames.size
+              ? Object.fromEntries([...sharedNames].map(name => [name, true]))
+              : undefined,
+            pinOn: (pinId) => pinFeedsProgram(comp, def, pinId)
+          }
+        );
+        result.bridges.forEach(bridge => {
+          const outputKey = pinKey(comp.id, bridge.pinId);
+          bridge.sources.forEach(sourceId => {
+            const sourceKey = pinKey(comp.id, sourceId);
+            if (find(outputKey) !== find(sourceKey)) grew = true;
+            union(outputKey, sourceKey);
+          });
+        });
+        const previousPins = (comp.programOutputs || []).join(',');
+        comp.programOutputs = result.bridges.map(bridge => bridge.pinId);
+        if (previousPins !== comp.programOutputs.join(',')) emissionChanged = true;
+        comp.programRares = result.rares;
+        comp.programNote = '';
+        if (!result.bridges.length && !result.rares.length) {
+          if (result.waiting) comp.programNote = 'waiting';
+          else if (result.fed) comp.programNote = 'fed';
+        }
+        if (tag && result.vars?.length) {
+          const set = written.get(tag) || new Set();
+          result.vars.forEach(name => set.add(name));
+          written.set(tag, set);
+        }
+      });
+      sharedByTag = written;
+      return { grew, emissionChanged, varsChanged: tagVarSig(written) !== usedSig };
+    };
 
-      if (comp.energized !== newlyEnergized) {
-        comp.energized = newlyEnergized;
-        changed = true;
+    // Programs run on the incoming contact state, then coils and contacts
+    // update. Doing it the other way opens a seal-in before the contact
+    // can feed the coil again.
+    let settle = true;
+    let settlePass = 0;
+    while (settle && settlePass < 8) {
+      settle = false;
+      settlePass += 1;
+      let again = true;
+      let growPass = 0;
+      while (again && growPass < 8) {
+        growPass += 1;
+        const applied = applyPrograms();
+        again = applied.grew || applied.emissionChanged || applied.varsChanged;
+        if (applied.grew || applied.emissionChanged) markPotentials();
       }
-
-      const tag = tagOf(comp);
-      if (comp.energized && tag && def.role === 'coil') {
-        activeTags.add(tag);
-      }
-    });
-
-    // An energized coil publishes its name. Its contacts follow.
-    // A pressed input does not: that would force the coil.
-    compMap.forEach(comp => {
-      const def = definitionFor(comp, symbolDefs);
-      if (!def) return;
-      const tag = tagOf(comp);
-      const tagActive = !!tag && activeTags.has(tag);
-
-      if ((def.role === 'load' || def.role === 'motor') && tagActive && !comp.energized) {
-        comp.energized = true;
-        changed = true;
-      }
-
-      if (def.role !== 'contact' || !tag || isThermal(def)) return;
-
-      let nextClosed = comp.state.closed;
-
-      if (def.contactType === 'NC') {
-        nextClosed = !tagActive;
-      } else if (
-        def.contactType === 'NO' ||
-        def.contactType === 'power_3p' ||
-        def.role === 'contact'
-      ) {
-        nextClosed = tagActive;
-      }
-      if (ioOf(def) === 'inout' && comp.state?.forced) {
-        nextClosed = def.contactType === 'NC' ? false : true;
-      }
-
-      if (comp.state.closed !== nextClosed) {
-        comp.state.closed = nextClosed;
-        changed = true;
-      }
-    });
+      const mid = powerStamp();
+      refreshPowerStates();
+      if (powerStamp() !== mid) settle = true;
+    }
+    if (powerStamp() !== beforePower) changed = true;
   }
 
   const linkedNames = new Set();
@@ -280,9 +509,7 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
 
   const energizedWires = new Set();
   wireList.forEach(wire => {
-    if (!wire?.from || !wire?.to) return;
-    const live = isPinLive(wire.from.compId, wire.from.pinId) || isPinLive(wire.to.compId, wire.to.pinId);
-    if (live) energizedWires.add(wire.id);
+    if (wire?.id && wireIsLive(wire)) energizedWires.add(wire.id);
   });
 
   compMap.forEach(comp => {
@@ -297,7 +524,11 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
     } else if (def.role === 'coil' && !comp.energized && wasEnergized) {
       logs.push(`[SIM] Bobina ${tag} desenergizada.`);
     } else if (def.role === 'motor' && comp.energized && !wasEnergized) {
-      logs.push(`[SIM] Motor ${tag} en marcha.`);
+      const sense = comp.spin === 'ccw' ? 'antihorario' : 'horario';
+      const why = comp.sequence === 'reverse' ? ' por secuencia inversa' : '';
+      logs.push(`[SIM] Motor ${tag} en marcha, giro ${sense}${why}.`);
+    } else if (def.role === 'motor' && comp.energized && wasEnergized && prior?.spin && comp.spin && prior.spin !== comp.spin) {
+      logs.push(`[SIM] Motor ${tag} ahora gira ${comp.spin === 'ccw' ? 'antihorario' : 'horario'}.`);
     } else if (def.role === 'motor' && !comp.energized && wasEnergized) {
       logs.push(`[SIM] Motor ${tag} detenido.`);
     } else if (def.role === 'load' && comp.energized && !wasEnergized) {
@@ -324,6 +555,21 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
       prior.closed !== false
     ) {
       logs.push(`[SYNC] Contacto NC ${tag} abierto por su bobina.`);
+    }
+  });
+
+  compMap.forEach(comp => {
+    const def = definitionFor(comp, symbolDefs);
+    if (def?.role === 'source' || def?.role === 'motor') return;
+    const tag = comp.tag || comp.id;
+    if (comp.programOutputs?.length) {
+      logs.push(`[SIM] ${tag}: la programación encendió el borne ${comp.programOutputs.join(', ')}.`);
+    } else if (comp.programRares?.length) {
+      logs.push(`[SIM] ${tag}: la programación encendió ${comp.programRares.map(item => item.name).join(', ')}.`);
+    } else if (comp.programNote === 'waiting') {
+      logs.push(`[SIM] ${tag}: la pieza está suelta o no tiene fuente, y no manda señal.`);
+    } else if (comp.programNote === 'fed') {
+      logs.push(`[SIM] ${tag}: la pieza tiene fuente, y la lógica dejó la salida apagada.`);
     }
   });
 

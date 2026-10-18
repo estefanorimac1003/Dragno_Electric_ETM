@@ -984,6 +984,7 @@ export function useCadDraw({
 
   apiRef.current.key = (event) => {
     if (!enabled) return;
+    if (event.target?.closest?.('[data-block-program]')) return;
     const tag = event.target?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || event.target?.isContentEditable) return;
     if (event.code === 'Space') {

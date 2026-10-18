@@ -14,9 +14,11 @@ import {
   Info,
   Wrench,
   Edit3,
-  Plus
+  Plus,
+  Trash2
 } from 'lucide-react';
 import { CATEGORIES, SYMBOL_DEFINITIONS } from '../cad/symbolCatalog';
+import { componentName } from '../cad/componentLabel';
 import SymbolThumb from './SymbolThumb';
 
 export default function LeftSidebar({
@@ -30,7 +32,8 @@ export default function LeftSidebar({
   isSimulating,
   symbolDefs = SYMBOL_DEFINITIONS,
   onOpenSymbolEditor,
-  onCreateSymbol
+  onCreateSymbol,
+  onRemoveLibrarySymbol
 }) {
   const [activeTab, setActiveTab] = useState('symbols'); // 'tree' | 'symbols' | 'devices'
   const [searchQuery, setSearchQuery] = useState('');
@@ -39,6 +42,7 @@ export default function LeftSidebar({
     'Potenciales y Señales': true,
     'Protección Eléctrica': true,
     'Mandos y Actuadores': true,
+    'Maniobra y control': true,
     'Cargas y Motores': true,
   });
 
@@ -222,6 +226,19 @@ export default function LeftSidebar({
                               >
                                 <Edit3 className="w-3 h-3" />
                               </button>
+                              {sym.role !== 'source' && (
+                                <button
+                                  type="button"
+                                  title="Quitar de la biblioteca. Lo que ya está en el plano se queda."
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onRemoveLibrarySymbol?.(sym.type);
+                                  }}
+                                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-red-400/80 bg-red-950/55 text-red-400 hover:bg-red-800 hover:text-white"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              )}
                             </div>
                           );
                         })}
@@ -278,20 +295,26 @@ export default function LeftSidebar({
                       {/* Components inside active sheet */}
                       {isActive && (
                         <div className="pl-4 space-y-0.5 border-l border-autocad-border/40 ml-2 py-1">
-                          {sheet.components?.map(c => (
-                            <div
-                              key={c.id}
-                              className="flex items-center justify-between px-1.5 py-0.5 text-[10px] text-autocad-textMuted hover:text-autocad-textBright"
-                            >
-                              <div className="flex items-center gap-1.5 truncate">
-                                <span className="font-mono text-autocad-yellow">{c.tag}</span>
-                                <span className="text-[9px] truncate">({c.type})</span>
+                          <p className="px-1.5 text-[9px] uppercase tracking-wide text-autocad-textMuted">Componentes</p>
+                          {sheet.components?.map((c, index) => {
+                            const def = symbolDefs[c.type] || SYMBOL_DEFINITIONS[c.type];
+                            return (
+                              <div
+                                key={c.id || `${sheet.id}-${index}`}
+                                className="flex items-center justify-between gap-1 px-1.5 py-0.5 text-[10px] text-autocad-textMuted hover:text-autocad-textBright"
+                              >
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <span className="font-mono text-autocad-yellow shrink-0">{c.tag}</span>
+                                  <span className="text-[9px] truncate">
+                                    {componentName(c, def).replace(/\n/g, ' ')}
+                                  </span>
+                                </div>
+                                {(c.energized || energizedById[c.id]) && (
+                                  <Zap className="w-3 h-3 shrink-0 text-autocad-green fill-autocad-green animate-pulse" />
+                                )}
                               </div>
-                              {(c.energized || energizedById[c.id]) && (
-                                <Zap className="w-3 h-3 text-autocad-green fill-autocad-green animate-pulse" />
-                              )}
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
@@ -310,7 +333,7 @@ export default function LeftSidebar({
                 Sincronización de Tags
               </span>
               <p className="text-[10px] text-autocad-textMuted mt-1">
-                Dispositivos con el mismo nombre se vinculan y operan en paralelo en tiempo real.
+                Dispositivos con el mismo tag se vinculan y operan en paralelo en tiempo real.
               </p>
             </div>
 
@@ -352,14 +375,17 @@ export default function LeftSidebar({
 
                     {/* Linked elements list */}
                     <div className="space-y-0.5 mt-1 border-t border-autocad-border/30 pt-1">
-                      {comps.map((c, i) => (
-                        <div key={c.id} className="flex items-center justify-between text-[10px] text-autocad-textMuted">
-                          <span className="truncate">{c.type}</span>
-                          <span className="font-mono text-[9px] text-autocad-cyan">
-                            {c.state?.closed ? 'CERRADO' : (c.state?.tripped ? 'DISPARADO' : 'NORMAL')}
-                          </span>
-                        </div>
-                      ))}
+                      {comps.map((c, index) => {
+                        const def = symbolDefs[c.type] || SYMBOL_DEFINITIONS[c.type];
+                        return (
+                          <div key={c.id || `${tag}-${index}`} className="flex items-center justify-between gap-1 text-[10px] text-autocad-textMuted">
+                            <span className="truncate">{componentName(c, def).replace(/\n/g, ' ')}</span>
+                            <span className="shrink-0 font-mono text-[9px] text-autocad-cyan">
+                              {c.state?.closed ? 'CERRADO' : (c.state?.tripped ? 'DISPARADO' : 'NORMAL')}
+                            </span>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );

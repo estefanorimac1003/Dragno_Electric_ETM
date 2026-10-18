@@ -7,11 +7,12 @@ import BottomStatusBar from './components/BottomStatusBar';
 import DeviceListModal from './components/DeviceListModal';
 import SymbolEditorModal from './components/SymbolEditorModal';
 import { SYMBOL_DEFINITIONS } from './cad/symbolCatalog';
-import { createBlankSymbol, getActiveSymbolDefinitions, isCustomDrawn, librarySymbolDefinitions } from './cad/symbolStore';
+import { createBlankSymbol, getActiveSymbolDefinitions, hideSymbolFromLibrary, isCustomDrawn, librarySymbolDefinitions } from './cad/symbolStore';
 import { solveCircuit } from './simulation/circuitSolver';
 import { exportSheetToDxf } from './services/dxfExporter';
 import {
   downloadProjectFile,
+  installLibraryHidden,
   installProjectSymbols,
   readProjectFile,
   recallProject,
@@ -20,7 +21,10 @@ import {
 import { SAMPLE_PROJECTS } from './sampleProjects';
 import { applyPlanTheme, readStoredPlanTheme } from './theme/planThemes';
 import { reanchorWire } from './cad/componentPose';
+import { applySelectionMove, insertWirePoint } from './cad/wireGeometry';
+import { createDesignHistory, endDesignGesture, noteDesignChange, redoDesign, undoDesign } from './cad/designHistory';
 import { ioOf, userCanOperate } from './cad/ioKind';
+import { isMomentaryPushbutton, pressedPushbuttonState, releasedPushbuttonState } from './cad/pushbutton';
 
 function loadInitialWorkspace() {
   const recalled = recallProject();
@@ -31,6 +35,7 @@ function loadInitialWorkspace() {
     };
   }
   try {
+    installLibraryHidden(recalled.libraryHidden);
     installProjectSymbols(recalled.symbols);
   } catch (err) {
     console.warn('No se pudieron restaurar las piezas del diseño:', err);
@@ -62,6 +67,19 @@ export default function App() {
   };
 
   const handleSymbolsUpdated = () => {
+    setSymbolDefs(getActiveSymbolDefinitions());
+  };
+
+  // Remove one library entry. Copies already placed on a sheet stay there.
+  const handleRemoveLibrarySymbol = (type) => {
+    const def = symbolDefs[type] || SYMBOL_DEFINITIONS[type];
+    if (!type || def?.role === 'source') return;
+    hideSymbolFromLibrary(type);
+    setPlacingSymbol(current => (current === type ? null : current));
+    if (editingSymbolType === type) {
+      setIsSymbolEditorOpen(false);
+      setEditingSymbolType('');
+    }
     setSymbolDefs(getActiveSymbolDefinitions());
   };
 
@@ -107,6 +125,58 @@ export default function App() {
 
   const projectRef = useRef(project);
   projectRef.current = project;
+  const activeSheetIdRef = useRef(activeSheetId);
+  activeSheetIdRef.current = activeSheetId;
+  const historyRef = useRef(createDesignHistory());
+  const [historySteps, setHistorySteps] = useState({ undo: 0, redo: 0 });
+
+  const publishHistory = (history) => {
+    historyRef.current = history;
+    setHistorySteps({ undo: history.past.length, redo: history.future.length });
+  };
+
+  // One snapshot before a change. A repeated gesture, such as dragging, keeps that first snapshot.
+  const rememberDesign = (gestureKey = null) => {
+    const next = noteDesignChange(historyRef.current, {
+      project: projectRef.current,
+      activeSheetId: activeSheetIdRef.current
+    }, gestureKey);
+    if (next === historyRef.current) return;
+    publishHistory(next);
+  };
+
+  const currentDesign = () => ({
+    project: projectRef.current,
+    activeSheetId: activeSheetIdRef.current
+  });
+
+  const applyDesignSnapshot = (snapshot) => {
+    heldInteractionRef.current = null;
+    projectRef.current = snapshot.project;
+    setProject(snapshot.project);
+    setActiveSheetId(snapshot.activeSheetId);
+    setSelectedElement(null);
+    setPlacingSymbol(null);
+  };
+
+  const handleUndoDesign = () => {
+    const result = undoDesign(historyRef.current, currentDesign());
+    if (!result) return;
+    publishHistory(result.history);
+    applyDesignSnapshot(result.snapshot);
+  };
+
+  const handleRedoDesign = () => {
+    const result = redoDesign(historyRef.current, currentDesign());
+    if (!result) return;
+    publishHistory(result.history);
+    applyDesignSnapshot(result.snapshot);
+  };
+
+  const handleUndoRef = useRef(handleUndoDesign);
+  const handleRedoRef = useRef(handleRedoDesign);
+  handleUndoRef.current = handleUndoDesign;
+  handleRedoRef.current = handleRedoDesign;
   const symbolDefsRef = useRef(symbolDefs);
   symbolDefsRef.current = symbolDefs;
   const isSimulatingRef = useRef(isSimulating);
@@ -243,7 +313,7 @@ export default function App() {
           const siblingDef = defFor(comp.type);
           // A click on one input can move the other inputs of that name.
           // It must not force a coil, a contact or any other output.
-          if (ioOf(def) !== 'in' || ioOf(siblingDef) !== 'in') return comp;
+          if (ioOf(def, target) !== 'in' || ioOf(siblingDef, comp) !== 'in') return comp;
           return { ...comp, state: stateForOperation(siblingDef, comp.state, operated) };
         })
       }))
@@ -256,13 +326,14 @@ export default function App() {
       nextDerived.set(comp.id, {
         closed: typeof comp.state?.closed === 'boolean' ? comp.state.closed : undefined,
         tripped: !!comp.state?.tripped,
-        energized: !!comp.energized
+        energized: !!comp.energized,
+        spin: comp.spin === 'cw' || comp.spin === 'ccw' ? comp.spin : null
       });
     });
     derivedSimRef.current = nextDerived;
 
     const signature = result.updatedComponents
-      .map(comp => `${comp.id}:${comp.energized ? 1 : 0}:${comp.state?.closed ? 1 : 0}:${comp.state?.tripped ? 1 : 0}`)
+      .map(comp => `${comp.id}:${comp.energized ? 1 : 0}:${comp.spin || ''}:${comp.state?.closed ? 1 : 0}:${comp.state?.tripped ? 1 : 0}:${(comp.programOutputs || []).join('.')}:${(comp.programRares || []).map(item => item.name).join('.')}:${comp.programNote || ''}`)
       .join('|');
 
     if (signature !== simSignatureRef.current) {
@@ -290,9 +361,8 @@ export default function App() {
     heldInteractionRef.current = null;
 
     const prev = projectRef.current;
-    const next = held.kind === 'momentary_NC'
-      ? withComponentState(prev, held.id, (state) => ({ ...state, pressed: false, closed: true }))
-      : withComponentState(prev, held.id, (state) => ({ ...state, pressed: false, closed: false }));
+    const def = defFor(prev.sheets.flatMap(sheet => sheet.components || []).find(item => item.id === held.id)?.type);
+    const next = withComponentState(prev, held.id, (state) => releasedPushbuttonState(state, def));
 
     projectRef.current = next;
     setProject(next);
@@ -314,9 +384,30 @@ export default function App() {
   }, [isSimulating, project, symbolDefs]);
 
   useEffect(() => {
-    const onPointerUp = () => releaseInteractionRef.current();
+    const onPointerUp = () => {
+      releaseInteractionRef.current();
+      const next = endDesignGesture(historyRef.current);
+      if (next !== historyRef.current) historyRef.current = next;
+    };
+    const onKeyDown = (event) => {
+      if (document.querySelector('[data-symbol-editor]')) return;
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === 'z' && !event.shiftKey) {
+        event.preventDefault();
+        handleUndoRef.current();
+      } else if (key === 'y' || (key === 'z' && event.shiftKey)) {
+        event.preventDefault();
+        handleRedoRef.current();
+      }
+    };
     window.addEventListener('mouseup', onPointerUp);
-    return () => window.removeEventListener('mouseup', onPointerUp);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mouseup', onPointerUp);
+      window.removeEventListener('keydown', onKeyDown);
+    };
   }, []);
 
   const handleToggleSimulation = () => {
@@ -324,6 +415,27 @@ export default function App() {
       releaseHeldInteraction();
       setIsSimulating(false);
       return;
+    }
+    // A pulsador cannot stay pressed. Drop a leftover hand before the solve,
+    // so a normally closed stop conducts again at rest.
+    const prev = projectRef.current;
+    let changed = false;
+    const next = {
+      ...prev,
+      sheets: (prev.sheets || []).map(sheet => ({
+        ...sheet,
+        components: (sheet.components || []).map(comp => {
+          const def = defFor(comp.type);
+          if (!isMomentaryPushbutton(def)) return comp;
+          if (!comp.state?.on && !comp.state?.pressed) return comp;
+          changed = true;
+          return { ...comp, state: releasedPushbuttonState(comp.state, def) };
+        })
+      }))
+    };
+    if (changed) {
+      projectRef.current = next;
+      setProject(next);
     }
     setIsSimulating(true);
   };
@@ -339,24 +451,22 @@ export default function App() {
     const def = defFor(comp.type);
     if (!def) return;
 
-    if (!userCanOperate(def)) {
+    if (!userCanOperate(def, comp)) {
       const tag = comp.tag || def.name || 'Pieza';
       setSimLogs(prev => [...prev, `[SIM] ${tag} es salida (OUT). Solo el circuito puede activarla.`].slice(-40));
       return;
     }
 
     let next = null;
+    const direction = ioOf(def, comp);
 
-    if (ioOf(def) === 'inout') {
+    if (direction === 'inout') {
       next = withComponentState(prev, comp.id, (state) => ({ ...state, forced: !state.forced }));
+    } else if (isMomentaryPushbutton(def)) {
+      heldInteractionRef.current = { id: compId, kind: 'momentary' };
+      next = withComponentState(prev, compId, (state) => pressedPushbuttonState(state, def));
     } else if (isCustomDrawn(def)) {
       next = withComponentState(prev, compId, (state) => ({ ...state, on: !state.on }));
-    } else if (def.switchType === 'momentary_NO') {
-      heldInteractionRef.current = { id: compId, kind: 'momentary_NO' };
-      next = withComponentState(prev, compId, (state) => ({ ...state, pressed: true, closed: true }));
-    } else if (def.switchType === 'momentary_NC') {
-      heldInteractionRef.current = { id: compId, kind: 'momentary_NC' };
-      next = withComponentState(prev, compId, (state) => ({ ...state, pressed: true, closed: false }));
     } else if (def.switchType === 'breaker') {
       const closed = comp.state?.closed === false;
       next = withComponentState(prev, compId, (state) => ({ ...state, closed }));
@@ -365,6 +475,10 @@ export default function App() {
       next = withComponentState(prev, compId, (state) => ({ ...state, tripped }));
     } else if (def.role === 'switch') {
       next = withComponentState(prev, compId, (state) => ({ ...state, closed: !state.closed }));
+    } else if (def.role === 'contact') {
+      next = withComponentState(prev, compId, (state) => ({ ...state, on: !state.on }));
+    } else if (def.role === 'coil' || def.role === 'load' || def.role === 'motor') {
+      next = withComponentState(prev, compId, (state) => ({ ...state, on: !state.on }));
     }
 
     if (!next) return;
@@ -389,6 +503,7 @@ export default function App() {
       state: { ...(def.defaultState || {}) }
     };
 
+    rememberDesign();
     setProject(prev => ({
       ...prev,
       sheets: prev.sheets.map(sheet =>
@@ -405,6 +520,21 @@ export default function App() {
   // Update Component (e.g. tag, position, rotation, state)
   const handleUpdateComponent = (compId, updates) => {
     const poseChanged = ['x', 'y', 'rotation'].some(key => Object.prototype.hasOwnProperty.call(updates, key));
+    let gesture = null;
+    if (Object.prototype.hasOwnProperty.call(updates, 'x') || Object.prototype.hasOwnProperty.call(updates, 'y')) {
+      gesture = `move:${compId}`;
+    } else if (Object.prototype.hasOwnProperty.call(updates, 'tagOffset')) {
+      gesture = `tagpos:${compId}`;
+    } else if (Object.prototype.hasOwnProperty.call(updates, 'nameOffset')) {
+      gesture = `namepos:${compId}`;
+    } else if (Object.prototype.hasOwnProperty.call(updates, 'tag')) {
+      gesture = `tag:${compId}`;
+    } else if (Object.prototype.hasOwnProperty.call(updates, 'name')) {
+      gesture = `name:${compId}`;
+    } else if (Object.prototype.hasOwnProperty.call(updates, 'nameStyle')) {
+      gesture = `namestyle:${compId}`;
+    }
+    rememberDesign(gesture);
     setProject(prev => ({
       ...prev,
       sheets: prev.sheets.map(sheet => {
@@ -434,17 +564,70 @@ export default function App() {
     }
   };
 
-  // Delete Component
+  // One drag moves every marked piece and every marked cable in the same step.
+  const handleMoveComponents = (moves, wireMoves = []) => {
+    const componentMoves = Array.isArray(moves) ? moves : [];
+    const cableMoves = Array.isArray(wireMoves) ? wireMoves : [];
+    if (!componentMoves.length && !cableMoves.length) return;
+    rememberDesign('move:selection');
+    const byId = new Map(componentMoves.map(item => [item.id, item]));
+    const cableIds = new Set(cableMoves.map(item => item.id));
+    setProject(prev => ({
+      ...prev,
+      sheets: prev.sheets.map(sheet => {
+        const touched = (sheet.components || []).some(comp => byId.has(comp.id))
+          || (sheet.wires || []).some(wire => cableIds.has(wire.id));
+        if (!touched) return sheet;
+        const moved = applySelectionMove(
+          sheet.components,
+          sheet.wires,
+          componentMoves,
+          cableMoves,
+          comp => defFor(comp.type)
+        );
+        return { ...sheet, components: moved.components, wires: moved.wires };
+      })
+    }));
+    if (selectedElement?.type === 'component' && byId.has(selectedElement.id)) {
+      const move = byId.get(selectedElement.id);
+      setSelectedElement(prev => ({
+        ...prev,
+        data: { ...prev.data, x: move.x, y: move.y }
+      }));
+    }
+  };
+
+  const handleDeleteSelection = (items) => {
+    if (!items?.length) return;
+    const compIds = new Set(items.filter(item => item.type === 'component').map(item => item.id));
+    const wireIds = new Set(items.filter(item => item.type === 'wire').map(item => item.id));
+    rememberDesign();
+    setProject(prev => ({
+      ...prev,
+      sheets: prev.sheets.map(sheet => ({
+        ...sheet,
+        components: (sheet.components || []).filter(comp => !compIds.has(comp.id)),
+        wires: (sheet.wires || []).filter(wire => (
+          !wireIds.has(wire.id)
+          && !compIds.has(wire?.from?.compId)
+          && !compIds.has(wire?.to?.compId)
+        ))
+      }))
+    }));
+    setSelectedElement(null);
+  };
+
+  // Delete one placed piece by its own id. Two pieces may share a tag.
   const handleDeleteComponent = (compId) => {
+    rememberDesign();
     setProject(prev => ({
       ...prev,
       sheets: prev.sheets.map(sheet => ({
         ...sheet,
         components: (sheet.components || []).filter(comp => comp.id !== compId),
-        // Also remove wires connected to this component
-        wires: (sheet.wires || []).filter(
-          wire => wire.from.compId !== compId && wire.to.compId !== compId
-        )
+        wires: (sheet.wires || []).filter(wire => (
+          wire?.from?.compId !== compId && wire?.to?.compId !== compId
+        ))
       }))
     }));
     if (selectedElement?.id === compId) {
@@ -452,20 +635,27 @@ export default function App() {
     }
   };
 
-  // Add Wire
-  const handleAddWire = (wire) => {
+  // Add Wire. A join inserts the touched point into the cable that was hit.
+  const handleAddWire = (wire, joins = []) => {
+    rememberDesign();
     setProject(prev => ({
       ...prev,
-      sheets: prev.sheets.map(sheet =>
-        sheet.id === activeSheetId
-          ? { ...sheet, wires: [...(sheet.wires || []), wire] }
-          : sheet
-      )
+      sheets: prev.sheets.map(sheet => {
+        if (sheet.id !== activeSheetId) return sheet;
+        let wires = sheet.wires || [];
+        joins.forEach(join => {
+          wires = wires.map(item => (
+            item.id === join.wireId ? insertWirePoint(item, join.point) : item
+          ));
+        });
+        return { ...sheet, wires: [...wires, wire] };
+      })
     }));
   };
 
   // Delete Wire
   const handleDeleteWire = (wireId) => {
+    rememberDesign();
     setProject(prev => ({
       ...prev,
       sheets: prev.sheets.map(sheet => ({
@@ -491,6 +681,7 @@ export default function App() {
       wires: []
     };
 
+    rememberDesign();
     setProject(prev => ({
       ...prev,
       sheets: [...prev.sheets, newSheet]
@@ -501,6 +692,7 @@ export default function App() {
   const handleCloseSheet = (sheetId) => {
     if (project.sheets.length <= 1) return;
     const filtered = project.sheets.filter(s => s.id !== sheetId);
+    rememberDesign();
     setProject(prev => ({ ...prev, sheets: filtered }));
     if (activeSheetId === sheetId) {
       setActiveSheetId(filtered[0].id);
@@ -508,6 +700,7 @@ export default function App() {
   };
 
   const handleUpdateSheetConfig = (updates) => {
+    rememberDesign(`sheet:${activeSheetId}`);
     setProject(prev => ({
       ...prev,
       sheets: prev.sheets.map(sheet =>
@@ -519,6 +712,7 @@ export default function App() {
   // Load Presets
   const handleLoadPreset = (presetKey) => {
     if (presetKey === 'proj_motor_starter') {
+      rememberDesign();
       setProject(SAMPLE_PROJECTS[0]);
       setActiveSheetId(SAMPLE_PROJECTS[0].sheets[0].id);
       setIsSimulating(false);
@@ -538,6 +732,7 @@ export default function App() {
           }
         ]
       };
+      rememberDesign();
       setProject(emptyProject);
       setActiveSheetId('sheet_1');
       setIsSimulating(false);
@@ -549,6 +744,8 @@ export default function App() {
   );
 
   const applyLoadedProject = (loaded) => {
+    rememberDesign();
+    installLibraryHidden(loaded.libraryHidden);
     installProjectSymbols(loaded.symbols);
     setSymbolDefs(getActiveSymbolDefinitions());
     setProject(loaded.project);
@@ -614,6 +811,10 @@ export default function App() {
         activeTool={activeTool}
         setActiveTool={setActiveTool}
         onSaveProject={handleSaveProject}
+        canUndo={historySteps.undo > 0}
+        canRedo={historySteps.redo > 0}
+        onUndo={handleUndoDesign}
+        onRedo={handleRedoDesign}
         onOpenProject={handleOpenProject}
         onExportDxf={handleExportDxf}
         onOpenSymbolEditor={() => handleOpenSymbolEditor()}
@@ -648,6 +849,7 @@ export default function App() {
           symbolDefs={librarySymbols}
           onOpenSymbolEditor={handleOpenSymbolEditor}
           onCreateSymbol={handleCreateSymbol}
+          onRemoveLibrarySymbol={handleRemoveLibrarySymbol}
         />
 
         {/* CAD Canvas Engine */}
@@ -661,6 +863,8 @@ export default function App() {
             onUpdateComponent={handleUpdateComponent}
             onDeleteComponent={handleDeleteComponent}
             onDeleteWire={handleDeleteWire}
+            onDeleteSelection={handleDeleteSelection}
+            onMoveComponents={handleMoveComponents}
             onAddWire={handleAddWire}
             selectedElement={selectedElement}
             onSelectElement={setSelectedElement}
@@ -679,6 +883,7 @@ export default function App() {
           selectedElement={selectedElement}
           onUpdateComponent={handleUpdateComponent}
           onDeleteComponent={handleDeleteComponent}
+          onDeleteSelection={handleDeleteSelection}
           sheet={activeSheet}
           onUpdateSheetConfig={handleUpdateSheetConfig}
           gridEnabled={gridEnabled}
@@ -689,6 +894,11 @@ export default function App() {
           setOrthoEnabled={setOrthoEnabled}
           symbolDefs={symbolDefs}
           onOpenSymbolEditor={handleOpenSymbolEditor}
+          livePiece={
+            isSimulating && selectedElement?.type === 'component'
+              ? simData?.updatedComponents?.find(item => item.id === selectedElement.id) || null
+              : null
+          }
         />
       </div>
 
@@ -710,6 +920,7 @@ export default function App() {
         sheets={project.sheets}
         energizedById={energizedById}
         isSimulating={isSimulating}
+        symbolDefs={symbolDefs}
       />
 
       <SymbolEditorModal

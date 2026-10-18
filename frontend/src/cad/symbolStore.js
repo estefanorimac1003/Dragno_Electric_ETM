@@ -1,8 +1,9 @@
 // Symbol Store and Dynamic Component Customization Engine
 // Handles custom piece geometries, pin connections, storage in localStorage and rendering
 
-import { SYMBOL_DEFINITIONS as DEFAULT_SYMBOLS, CATEGORIES as DEFAULT_CATEGORIES } from './symbolCatalog';
-import { DEFAULT_LAYERS, boundsOfMany, layerState } from './draw/geometry';
+import { SYMBOL_DEFINITIONS as DEFAULT_SYMBOLS, CATEGORIES as DEFAULT_CATEGORIES, SWITCH_GROUP } from './symbolCatalog';
+import { DEFAULT_LAYERS, layerState } from './draw/geometry';
+import { labelAnchorBox } from './componentLabel';
 import { defaultPinLinks } from './pinLinks';
 import { ioOf, userCanOperate } from './ioKind';
 import { tracePrimitive } from './draw/tracePrimitive';
@@ -10,6 +11,36 @@ import { applyDash } from './draw/lineStyle';
 
 
 const STORAGE_KEY = 'dragno_custom_symbols_v1';
+const LIBRARY_HIDDEN_KEY = 'dragno_library_hidden_v1';
+
+// The editor stores the drawing and the name. These fields are the electrical
+// behavior, and a saved drawing must not replace them.
+const LOGIC_FIELDS = [
+  'role',
+  'io',
+  'negate',
+  'switchType',
+  'contactType',
+  'linkedRole',
+  'behavior',
+  'followsRole',
+  'pinLinks',
+  'defaultState'
+];
+
+function visualSymbolOverlay(customDef) {
+  const overlay = { ...(customDef || {}) };
+  LOGIC_FIELDS.forEach(field => delete overlay[field]);
+  if (Array.isArray(overlay.pins)) {
+    overlay.pins = overlay.pins.map(pin => {
+      if (!pin || pin.negate === undefined) return pin;
+      const copy = { ...pin };
+      delete copy.negate;
+      return copy;
+    });
+  }
+  return overlay;
+}
 
 // Default primitive vector geometries for each built-in symbol
 export const DEFAULT_PRIMITIVES = {
@@ -108,6 +139,49 @@ export function saveCustomSymbol(symbolDef) {
   }
 }
 
+function readHiddenLibraryTypes() {
+  try {
+    const raw = localStorage.getItem(LIBRARY_HIDDEN_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(list)) return [];
+    return list.filter(item => typeof item === 'string' && item);
+  } catch {
+    return [];
+  }
+}
+
+export function hiddenLibraryTypes() {
+  return readHiddenLibraryTypes();
+}
+
+// Drop a piece from the library list. The definition stays, so a copy already
+// drawn on a sheet keeps its symbol.
+export function hideSymbolFromLibrary(type) {
+  const id = String(type || '');
+  if (!id) return readHiddenLibraryTypes();
+  const hidden = new Set(readHiddenLibraryTypes());
+  hidden.add(id);
+  const list = [...hidden];
+  try {
+    localStorage.setItem(LIBRARY_HIDDEN_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.error('Error ocultando símbolo de la biblioteca:', err);
+  }
+  return list;
+}
+
+export function replaceHiddenLibraryTypes(list) {
+  const next = Array.isArray(list)
+    ? list.filter(item => typeof item === 'string' && item)
+    : [];
+  try {
+    localStorage.setItem(LIBRARY_HIDDEN_KEY, JSON.stringify([...new Set(next)]));
+  } catch (err) {
+    console.error('Error guardando la biblioteca oculta:', err);
+  }
+  return readHiddenLibraryTypes();
+}
+
 // Delete or reset a custom symbol
 export function deleteCustomSymbol(type) {
   try {
@@ -143,7 +217,7 @@ export function getActiveSymbolDefinitions() {
   Object.keys(custom).forEach(type => {
     const stored = {
       ...(merged[type] || {}),
-      ...custom[type],
+      ...visualSymbolOverlay(custom[type]),
       isCustom: true
     };
     // A piece the user drew is rest sprite + actuated sprite + the pin table.
@@ -153,7 +227,11 @@ export function getActiveSymbolDefinitions() {
       delete stored.contactType;
       delete stored.linkedRole;
       delete stored.behavior;
-      if (!stored.role) stored.role = 'switch';
+      if (!stored.role) {
+        // A drawn motor keeps the three-phase sequence. Other drawn pieces
+        // stay switches, because the editor does not store a role.
+        stored.role = /^motor\b/i.test(String(stored.name || '').trim()) ? 'motor' : 'switch';
+      }
       stored.defaultState = { on: false };
     }
     merged[type] = stored;
@@ -164,12 +242,20 @@ export function getActiveSymbolDefinitions() {
 
 // Library list. Factory pieces stay hidden, except the voltage sources
 // and the pieces marked library (the contactor coil and its switch).
+// A type the user removed stays out of this list. Sources always stay.
 export function librarySymbolDefinitions(defs = {}) {
+  const hidden = new Set(readHiddenLibraryTypes());
   const library = {};
   Object.keys(defs).forEach(type => {
     const def = defs[type];
     const factory = DEFAULT_SYMBOLS[type];
     const category = def?.category || factory?.category || 'Personalizados';
+    const role = def?.role || factory?.role;
+    if (role === 'source') {
+      library[type] = { ...def, category };
+      return;
+    }
+    if (hidden.has(type)) return;
     if (factory && category !== 'Potenciales y Señales' && !def?.library && !factory.library) return;
     library[type] = {
       ...def,
@@ -188,6 +274,7 @@ export function createBlankSymbol(category = 'Personalizados') {
     category: category || 'Personalizados',
     role: 'switch',
     io: 'in',
+    ...(category === SWITCH_GROUP ? { momentary: true } : {}),
     defaultState: { on: false },
     width: 40,
     height: 50,
@@ -217,34 +304,7 @@ export function createBlankSymbol(category = 'Personalizados') {
 // Click target in symbol coordinates. The declared width is only a starting box:
 // a guardamotor drawn wider than that field must still receive the click.
 export function symbolHitBox(def) {
-  const halfW = (def?.width || 40) / 2;
-  const halfH = (def?.height || 50) / 2;
-  const boxes = [{ minX: -halfW, minY: -halfH, maxX: halfW, maxY: halfH }];
-  const drawn = boundsOfMany([...(def?.primitives || []), ...(def?.activePrimitives || [])]);
-  if (drawn) boxes.push(drawn);
-  const pins = (def?.pins || []).filter(pin => Number.isFinite(pin.x) && Number.isFinite(pin.y));
-  if (pins.length) {
-    const pinBox = boundsOfMany(pins.map(pin => ({
-      type: 'circle',
-      cx: pin.x,
-      cy: pin.y,
-      r: Math.max(pin.r || def?.pinRadius || 1.5, 6)
-    })));
-    if (pinBox) boxes.push(pinBox);
-  }
-  const box = boxes.reduce((acc, item) => ({
-    minX: Math.min(acc.minX, item.minX),
-    minY: Math.min(acc.minY, item.minY),
-    maxX: Math.max(acc.maxX, item.maxX),
-    maxY: Math.max(acc.maxY, item.maxY)
-  }));
-  const pad = 8;
-  return {
-    minX: box.minX - pad,
-    minY: box.minY - pad,
-    maxX: box.maxX + pad,
-    maxY: box.maxY + pad
-  };
+  return labelAnchorBox(def);
 }
 
 // The actuated sprite is the drawing used when the piece is operated:
@@ -258,14 +318,14 @@ export function isCustomDrawn(def) {
 export function isSymbolActuated(comp, def) {
   const state = comp?.state || {};
   if (isCustomDrawn(def)) {
-    if (userCanOperate(def) && (state.on || state.pressed || state.forced)) return true;
+    if (userCanOperate(def, comp) && (state.on || state.pressed || state.forced)) return true;
     if (def.role === 'coil' || def.role === 'load' || def.role === 'motor') {
       return !!comp?.energized || !!comp?.linked;
     }
-    if (def.role === 'contact' || ioOf(def) === 'out') return !!comp?.linked || state.closed === true;
+    if (def.role === 'contact' || ioOf(def, comp) === 'out') return !!comp?.linked || state.closed === true;
     return false;
   }
-  if (comp?.linked && !userCanOperate(def)) return true;
+  if (comp?.linked && !userCanOperate(def, comp)) return true;
   if (def?.role === 'coil' || def?.role === 'load' || def?.role === 'motor') return !!comp?.energized;
   if (def?.switchType === 'thermal' || def?.linkedRole === 'thermal') return state.tripped === true;
   if (def?.contactType === 'NC' || def?.switchType === 'momentary_NC') {

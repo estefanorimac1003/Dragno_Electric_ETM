@@ -149,7 +149,6 @@ export function paintEditor(ctx, scene) {
 
   paintSelection(ctx, scene);
   paintNodes(ctx, scene);
-  paintPinLinks(ctx, scene);
   paintPins(ctx, scene);
   paintSnap(ctx, scene);
   ctx.restore();
@@ -285,33 +284,6 @@ function paintNodes(ctx, scene) {
       ctx.fillRect(node.x - grip / 2, node.y - grip / 2, grip, grip);
       ctx.strokeRect(node.x - grip / 2, node.y - grip / 2, grip, grip);
     }
-  });
-}
-
-function paintPinLinks(ctx, scene) {
-  const byId = new Map((scene.pins || []).map(pin => [pin.id, pin]));
-  (scene.pinLinks || []).forEach(link => {
-    const from = byId.get(link.from);
-    const to = byId.get(link.to);
-    if (!from || !to || link.from === link.to) return;
-    ctx.save();
-    ctx.strokeStyle = canvasPalette().liveLine;
-    ctx.setLineDash([5 / scene.zoom, 3 / scene.zoom]);
-    ctx.lineWidth = 1.2 / scene.zoom;
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(to.x, to.y);
-    ctx.stroke();
-    const angle = Math.atan2(to.y - from.y, to.x - from.x);
-    const size = 7 / scene.zoom;
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.moveTo(to.x, to.y);
-    ctx.lineTo(to.x - size * Math.cos(angle - 0.45), to.y - size * Math.sin(angle - 0.45));
-    ctx.moveTo(to.x, to.y);
-    ctx.lineTo(to.x - size * Math.cos(angle + 0.45), to.y - size * Math.sin(angle + 0.45));
-    ctx.stroke();
-    ctx.restore();
   });
 }
 

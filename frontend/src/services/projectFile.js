@@ -1,6 +1,6 @@
 // A design file is the sheets, the pieces on them, and the custom symbols they use.
 
-import { getStoredCustomSymbols, saveCustomSymbol } from '../cad/symbolStore';
+import { getStoredCustomSymbols, hiddenLibraryTypes, replaceHiddenLibraryTypes, saveCustomSymbol } from '../cad/symbolStore';
 
 export const PROJECT_FILE_FORMAT = 'dragno-electric-project';
 const PROJECT_STORAGE_KEY = 'dragno_project_v1';
@@ -18,7 +18,8 @@ export function buildProjectFile(project, activeSheetId, symbols = {}) {
       designer: project.designer,
       sheets: project.sheets || []
     },
-    symbols
+    symbols,
+    libraryHidden: hiddenLibraryTypes()
   };
 }
 
@@ -40,13 +41,19 @@ export function parseProjectFile(data) {
     ? data.activeSheetId
     : sheets[0].id;
   const symbols = data.symbols && typeof data.symbols === 'object' ? data.symbols : {};
-  return { project, activeSheetId, symbols };
+  const libraryHidden = Array.isArray(data.libraryHidden) ? data.libraryHidden : null;
+  return { project, activeSheetId, symbols, libraryHidden };
 }
 
 export function installProjectSymbols(symbols) {
   Object.values(symbols || {}).forEach(def => {
     if (def && def.type) saveCustomSymbol(def);
   });
+}
+
+export function installLibraryHidden(list) {
+  if (!Array.isArray(list)) return;
+  replaceHiddenLibraryTypes(list);
 }
 
 export function recallProject() {
