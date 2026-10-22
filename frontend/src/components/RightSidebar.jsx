@@ -4,9 +4,42 @@ import { SHEET_SIZES } from '../cad/titleBlock';
 import { SYMBOL_DEFINITIONS } from '../cad/symbolCatalog';
 import { isCustomDrawn } from '../cad/symbolStore';
 import { normalizeRotation } from '../cad/componentPose';
-import { nameIsPlaced, nameStyleOf, tagIsPlaced } from '../cad/componentLabel';
+import { nameIsPlaced, nameStyleOf, tagIsPlaced, textTurn } from '../cad/componentLabel';
 import { ioOf, userCanOperate } from '../cad/ioKind';
 import { motorSpinOf, motorTurnOf } from '../cad/motorTurn';
+
+function TextTurn({ value, onChange }) {
+  const stored = textTurn(value);
+  return (
+    <div className="mt-1">
+      <span className="block text-[10px] text-autocad-textMuted mb-1">
+        Giro del texto: {stored || 360}°
+      </span>
+      <div className="grid grid-cols-4 gap-1">
+        {[90, 180, 270, 360].map(angle => {
+          const active = angle === 360 ? stored === 0 : stored === angle;
+          return (
+            <button
+              key={angle}
+              type="button"
+              onClick={() => onChange(angle === 360 ? 0 : angle)}
+              className={`py-1 rounded border font-mono text-[10px] ${
+                active
+                  ? 'bg-autocad-cyan text-autocad-onAccent border-autocad-cyan'
+                  : 'bg-autocad-inset border-autocad-border text-autocad-textBright hover:border-autocad-cyan'
+              }`}
+            >
+              {angle}°
+            </button>
+          );
+        })}
+      </div>
+      <p className="text-[9px] text-autocad-textMuted mt-1">
+        Gira solo este texto. La pieza queda en su sitio.
+      </p>
+    </div>
+  );
+}
 
 function NameStyleBar({ comp, onChange }) {
   const style = nameStyleOf(comp);
@@ -161,10 +194,19 @@ export default function RightSidebar({
                     className="w-full bg-autocad-inset border border-autocad-border rounded px-2 py-1 text-xs text-autocad-cyan font-mono font-bold focus:outline-none focus:border-autocad-cyan"
                     placeholder="Ej: -K1, SB1, QM1"
                   />
+                  <TextTurn
+                    value={compData.tagRotation}
+                    onChange={(tagRotation) => onUpdateComponent(compData.id, { tagRotation })}
+                  />
                   <p className="text-[9px] text-autocad-textMuted mt-1">
                     Sale a la izquierda de la pieza. Arrástralo en el plano sin mover el nombre.
                     {tagIsPlaced(compData) ? ' Ahora está colocado a mano.' : ' Ahora está a la izquierda.'}
                   </p>
+                  {compDef.role === 'terminal' && (
+                    <p className="text-[9px] text-autocad-textMuted mt-1">
+                      El mismo tag une este borne con los demás, en esta hoja y en las otras. Si uno recibe tensión, los otros del mismo tag se encienden. Cada número de pin es una conexión distinta.
+                    </p>
+                  )}
                 </div>
 
                 <div>
@@ -181,6 +223,10 @@ export default function RightSidebar({
                   <NameStyleBar
                     comp={compData}
                     onChange={(nameStyle) => onUpdateComponent(compData.id, { nameStyle })}
+                  />
+                  <TextTurn
+                    value={compData.nameRotation}
+                    onChange={(nameRotation) => onUpdateComponent(compData.id, { nameRotation })}
                   />
                   <p className="text-[9px] text-autocad-textMuted mt-1">
                     Enter parte el nombre en otra línea para que ocupe menos ancho. Empieza con el nombre de la lista y puedes escribir el código. Arrástralo por su cuenta.
@@ -295,7 +341,7 @@ export default function RightSidebar({
                   </div>
                 )}
 
-                {compDef.role !== 'source' && (
+                {compDef.role !== 'source' && compDef.role !== 'terminal' && (
                   <div className="border border-autocad-border/60 rounded p-2 bg-autocad-raised">
                     <span className="block text-[10px] font-semibold text-autocad-textBright mb-1">Dirección</span>
                     <div className="grid grid-cols-3 gap-1">

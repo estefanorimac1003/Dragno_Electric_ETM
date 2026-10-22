@@ -4,7 +4,7 @@
 import { SYMBOL_DEFINITIONS } from '../cad/symbolCatalog';
 import { conductingPairs } from '../cad/pinLinks';
 import { isCustomDrawn } from '../cad/symbolStore';
-import { ioOf, mouseActuated, userCanOperate } from '../cad/ioKind';
+import { ioOf, isTerminalSymbol, mouseActuated, userCanOperate } from '../cad/ioKind';
 import { deviceIsNegated, pinIsNegated } from '../cad/outputNot';
 import { evaluateProgram, hasBlockProgram, programOwnedPins, programWiresHand, withActuatedBlock } from '../cad/blockProgram';
 import { componentName } from '../cad/componentLabel';
@@ -24,6 +24,32 @@ function isThermal(def) {
 
 function tagOf(comp) {
   return String(comp?.tag || '').trim().toUpperCase();
+}
+
+function terminalNodeName(pin) {
+  return String(pin?.label || pin?.id || '').trim().toUpperCase();
+}
+
+// Bornes with the same tag and the same pin name are one node on every sheet.
+function bondNamedTerminals(compMap, symbolDefs, union, pinKey) {
+  const groups = new Map();
+  compMap.forEach(comp => {
+    const def = definitionFor(comp, symbolDefs);
+    if (!isTerminalSymbol(def)) return;
+    const tag = tagOf(comp);
+    if (!tag) return;
+    (def.pins || []).forEach(pin => {
+      const node = terminalNodeName(pin);
+      if (!node) return;
+      const key = `${tag}::${node}`;
+      const list = groups.get(key) || [];
+      list.push(pinKey(comp.id, pin.id));
+      groups.set(key, list);
+    });
+  });
+  groups.forEach(list => {
+    for (let index = 1; index < list.length; index += 1) union(list[0], list[index]);
+  });
 }
 
 function sourcePhase(pin) {
@@ -49,6 +75,7 @@ function isConducting(comp, def) {
   // The pin table conducts while the drawn piece shows its actuated sprite.
   if (isCustomDrawn(def)) {
     if (def.role === 'passive') return true;
+    if (isTerminalSymbol(def)) return false;
     if (def.role === 'source' || def.role === 'coil' || def.role === 'load' || def.role === 'motor') return false;
     if (ioOf(def, comp) === 'out') return def.contactType === 'NC' ? state.closed !== false : !!state.closed;
     if (isMomentaryPushbutton(def)) return !!(state.pressed || state.forced);
@@ -92,7 +119,7 @@ function bridgesPins(def) {
 // Coils, lamps, motors and sources do not pass a pole through to another pole.
 function conductsAcross(def) {
   if (!def) return false;
-  if (def.role === 'coil' || def.role === 'load' || def.role === 'motor' || def.role === 'source') return false;
+  if (def.role === 'coil' || def.role === 'load' || def.role === 'motor' || def.role === 'source' || isTerminalSymbol(def)) return false;
   return bridgesPins(def);
 }
 
@@ -196,6 +223,8 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
         union(pinKey(comp.id, a), pinKey(comp.id, b));
       });
     });
+
+    bondNamedTerminals(compMap, symbolDefs, union, pinKey);
 
     const liveRoots = new Set();
     const neutralRoots = new Set();
@@ -351,7 +380,7 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
         }
 
         const tag = tagOf(comp);
-        if (!tag || def.role === 'source' || isThermal(def)) return;
+        if (!tag || def.role === 'source' || isTerminalSymbol(def) || isThermal(def)) return;
         const powered = (def.role === 'coil' || def.role === 'load' || def.role === 'motor') && comp.energized;
         if (powered || userActuated.has(comp.id)) activeTags.add(tag);
       });
@@ -360,7 +389,7 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
       // A contact that merely stayed closed does not keep the device on.
       compMap.forEach(comp => {
         const def = definitionFor(comp, symbolDefs);
-        if (!def || def.role === 'source' || isThermal(def)) return;
+        if (!def || def.role === 'source' || isTerminalSymbol(def) || isThermal(def)) return;
         const tag = tagOf(comp);
         const tagActive = !!tag && activeTags.has(tag);
         const normallyClosed = def.contactType === 'NC' || def.switchType === 'momentary_NC';
@@ -418,7 +447,7 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
         const def = definitionFor(comp, symbolDefs);
         // A source already carries its potential. A motor follows the phase
         // sequence on U1, V1 and W1. Neither one is a block program.
-        if (!def || def.role === 'source' || def.role === 'motor' || !hasBlockProgram(def)) {
+        if (!def || def.role === 'source' || def.role === 'motor' || isTerminalSymbol(def) || !hasBlockProgram(def)) {
           comp.programOutputs = [];
           comp.programRares = [];
           comp.programNote = '';
@@ -505,6 +534,20 @@ export function solveCircuit(components, wires, symbolDefs = null, priorStates =
   });
   compMap.forEach(comp => {
     if (linkedNames.has(tagOf(comp))) comp.linked = true;
+  });
+
+  compMap.forEach(comp => {
+    const def = definitionFor(comp, symbolDefs);
+    if (!isTerminalSymbol(def)) {
+      comp.livePins = [];
+      return;
+    }
+    const livePins = (def.pins || [])
+      .filter(pin => isPinLive(comp.id, pin.id))
+      .map(pin => pin.id);
+    comp.livePins = livePins;
+    // The sibling with the same tag shares this node, so it lights too.
+    comp.energized = livePins.length > 0;
   });
 
   const energizedWires = new Set();

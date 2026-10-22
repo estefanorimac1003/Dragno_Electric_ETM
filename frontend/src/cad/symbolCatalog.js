@@ -3,6 +3,7 @@
 
 export const SWITCH_GROUP = 'Interruptores y Botoneras';
 export const CONTROL_GROUP = 'Maniobra y control';
+export const TERMINAL_GROUP = 'Borneras y conexiones';
 
 export const CATEGORIES = [
   'Lo más usado',
@@ -11,6 +12,7 @@ export const CATEGORIES = [
   'Mandos y Actuadores',
   SWITCH_GROUP,
   CONTROL_GROUP,
+  TERMINAL_GROUP,
   'Cargas y Motores',
 ];
 

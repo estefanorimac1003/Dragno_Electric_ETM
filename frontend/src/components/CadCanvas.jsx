@@ -4,6 +4,7 @@ import { SYMBOL_DEFINITIONS } from '../cad/symbolCatalog';
 import { renderSymbolPrimitives, symbolHitBox, symbolSprite } from '../cad/symbolStore';
 import { canvasPalette, getPlanThemeId, subscribePlanTheme } from '../theme/planThemes';
 import { nextRotation, normalizeRotation, pinWorld, worldToLocal } from '../cad/componentPose';
+import { isTerminalSymbol } from '../cad/ioKind';
 import { labelPartAt, nameHitBox, nameLinePositions, textHitBox, TAG_FONT } from '../cad/componentLabel';
 import { negationMarks } from '../cad/outputNot';
 import { paintMotorArrow } from '../cad/motorTurn';
@@ -63,6 +64,15 @@ function paintNegationMark(ctx, comp, def, color) {
   });
 }
 
+function paintTurned(ctx, x, y, rotation, draw) {
+  ctx.save();
+  ctx.translate(x, y);
+  const turn = Number(rotation) || 0;
+  if (turn) ctx.rotate((turn * Math.PI) / 180);
+  draw();
+  ctx.restore();
+}
+
 function paintComponentLabel(ctx, comp, def, palette, activePart) {
   const layout = nameLinePositions(comp, def);
   const labels = layout.labels;
@@ -72,30 +82,40 @@ function paintComponentLabel(ctx, comp, def, palette, activePart) {
   };
   ctx.save();
   ctx.textBaseline = 'middle';
-  ctx.textAlign = 'right';
   ctx.font = TAG_FONT;
   ctx.fillStyle = comp.energized ? palette.tagLive : palette.tag;
-  if (labels.tag) ctx.fillText(labels.tag, labels.tagX, labels.tagY);
-  if (layout.lines.length) {
-    ctx.font = layout.font;
-    ctx.textAlign = layout.style.align;
-    ctx.fillStyle = palette.text;
-    layout.lines.forEach(line => {
-      if (line.text) ctx.fillText(line.text, line.x, line.y);
+  if (labels.tag) {
+    paintTurned(ctx, labels.tagX, labels.tagY, labels.tagRotation, () => {
+      ctx.textAlign = 'right';
+      ctx.fillText(labels.tag, 0, 0);
     });
   }
-  const strokeBox = (box) => {
+  if (layout.lines.length) {
+    ctx.font = layout.font;
+    ctx.fillStyle = palette.text;
+    paintTurned(ctx, labels.nameX, labels.nameY, labels.nameRotation, () => {
+      ctx.textAlign = layout.style.align;
+      layout.lines.forEach(line => {
+        if (line.text) ctx.fillText(line.text, line.x - labels.nameX, line.y - labels.nameY);
+      });
+    });
+  }
+  const strokeBox = (box, anchorX, anchorY, rotation) => {
     if (!box) return;
-    ctx.strokeStyle = palette.select;
-    ctx.lineWidth = 0.8;
-    ctx.setLineDash([3, 2]);
-    ctx.strokeRect(box.minX, box.minY, box.maxX - box.minX, box.maxY - box.minY);
-    ctx.setLineDash([]);
+    paintTurned(ctx, anchorX, anchorY, rotation, () => {
+      ctx.strokeStyle = palette.select;
+      ctx.lineWidth = 0.8;
+      ctx.setLineDash([3, 2]);
+      ctx.strokeRect(box.minX - anchorX, box.minY - anchorY, box.maxX - box.minX, box.maxY - box.minY);
+      ctx.setLineDash([]);
+    });
   };
   if (activePart === 'tag' && labels.tag) {
-    strokeBox(textHitBox(labels.tagX, labels.tagY, labels.tag, TAG_FONT, measure, 11));
+    strokeBox(textHitBox(labels.tagX, labels.tagY, labels.tag, TAG_FONT, measure, 11), labels.tagX, labels.tagY, labels.tagRotation);
   }
-  if (activePart === 'name') strokeBox(nameHitBox(comp, def, measure));
+  if (activePart === 'name') {
+    strokeBox(nameHitBox(comp, def, measure), labels.nameX, labels.nameY, labels.nameRotation);
+  }
   ctx.restore();
 }
 
@@ -119,7 +139,9 @@ export default function CadCanvas({
   snapEnabled = true,
   orthoEnabled = true,
   onCursorMove,
-  onSimulationPointerDown
+  onSimulationPointerDown,
+  setActiveTool,
+  toolPick = 0
 }) {
   const canvasRef = useRef(null);
 
@@ -146,6 +168,10 @@ export default function CadCanvas({
   // Wire creation state. A route is the cable the user is still laying down.
   const [wireRoute, setWireRoute] = useState(null); // { points, from, title }
   const wireRouteRef = useRef(null);
+  // True only while the borne itself turned the wire tool on.
+  const proximityWireRef = useRef(false);
+  // The user picked a tool. Stay with that choice until the cursor leaves the bornes.
+  const userHeldToolRef = useRef(false);
   const [pinPrompt, setPinPrompt] = useState(null);
   const [hoverPin, setHoverPin] = useState(null);
   const [hoverJoint, setHoverJoint] = useState(null);
@@ -372,12 +398,15 @@ export default function CadCanvas({
       }
 
       // Draw Pins snap dots in the piece frame, so they turn with it.
-      if (def?.pins && (activeTool === 'wire' || activeTool === 'select' || activeTool === 'rotate')) {
+      const showPins = activeTool === 'wire' || activeTool === 'select' || activeTool === 'rotate'
+        || (isSimulating && isTerminalSymbol(def) && (comp.livePins || []).length > 0);
+      if (def?.pins && showPins) {
         def.pins.forEach(pin => {
-          const pinRadius = pin.r ?? def.pinRadius ?? 1.5;
+          const hotPin = isSimulating && (comp.livePins || []).includes(pin.id);
+          const pinRadius = (pin.r ?? def.pinRadius ?? 1.5) * (hotPin ? 1.8 : 1);
           ctx.beginPath();
           ctx.arc(pin.x, pin.y, pinRadius, 0, Math.PI * 2);
-          ctx.fillStyle = palette.pin;
+          ctx.fillStyle = hotPin ? '#00e676' : palette.pin;
           ctx.fill();
           ctx.strokeStyle = palette.text;
           ctx.lineWidth = Math.max(0.4, pinRadius * 0.35);
@@ -636,6 +665,10 @@ export default function CadCanvas({
     setWireRoute(next);
   };
 
+  const releaseRoute = () => {
+    rememberRoute(null);
+  };
+
   // A point on the sheet adds a corner. A pin or a cable finishes the run.
   // The second click of a double-click does not start another cable.
   const takeWireTarget = (target, finishPoint = false) => {
@@ -658,7 +691,7 @@ export default function CadCanvas({
       && target.pinId === route.from.pinId
       && route.points.length < 2;
     if (sameStartPin) {
-      if (!finishPoint) rememberRoute(null);
+      if (!finishPoint) releaseRoute();
       return;
     }
     if (target.kind === 'point' && !finishPoint) {
@@ -682,7 +715,7 @@ export default function CadCanvas({
       waypoints: points,
       manual: route.points.length > 1 || joins.length > 0
     }, joins);
-    rememberRoute(null);
+    releaseRoute();
   };
 
   const defFor = (comp) => symbolDefs[comp?.type] || SYMBOL_DEFINITIONS[comp?.type];
@@ -950,7 +983,9 @@ export default function CadCanvas({
       onCursorMove(snapped.x, snapped.y);
     }
 
-    if (activeTool === 'wire') {
+    const pointerBusy = isPanning || draggingComp || draggingLabel || groupDragRef.current || marqueeRef.current || placingSymbol;
+    const trackPins = activeTool === 'wire' || (activeTool === 'select' && !pointerBusy && !isSimulating);
+    if (trackPins) {
       const pinRadius = Math.max(10, 22 / transform.scale);
       const near = pinsNear(rawWorld.x, rawWorld.y, pinRadius);
       const next = near[0] || null;
@@ -964,6 +999,17 @@ export default function CadCanvas({
           ? prev
           : jointPoint
       ));
+      if (!near.length) userHeldToolRef.current = false;
+      const armRadius = Math.max(8, 14 / transform.scale);
+      const onNode = !!(next && next.dist <= armRadius);
+      const canFollow = !isSimulating && !pointerBusy && !pinPrompt && !wireRouteRef.current;
+      if (canFollow && proximityWireRef.current && !near.length) {
+        proximityWireRef.current = false;
+        setActiveTool?.('select');
+      } else if (canFollow && activeTool === 'select' && onNode && !userHeldToolRef.current) {
+        proximityWireRef.current = true;
+        setActiveTool?.('wire');
+      }
     } else if (hoverPin || hoverJoint) {
       setHoverPin(null);
       setHoverJoint(null);
@@ -1065,6 +1111,7 @@ export default function CadCanvas({
 
   useEffect(() => {
     if (activeTool !== 'wire') {
+      proximityWireRef.current = false;
       wireRouteRef.current = null;
       setWireRoute(null);
       setPinPrompt(null);
@@ -1081,6 +1128,18 @@ export default function CadCanvas({
       }
     }
   }, [activeTool]);
+
+  // A click on the tool bar is a real choice. The borne must not switch it back
+  // until the cursor has left every terminal. The first value is only the page opening.
+  const toolPickSeen = useRef(false);
+  useEffect(() => {
+    if (!toolPickSeen.current) {
+      toolPickSeen.current = true;
+      return;
+    }
+    userHeldToolRef.current = true;
+    proximityWireRef.current = false;
+  }, [toolPick]);
 
   // Releasing outside the sheet ends the group drag. A removed piece leaves the selection.
   useEffect(() => {
@@ -1102,14 +1161,20 @@ export default function CadCanvas({
   useEffect(() => {
     const compIds = new Set((sheet.components || []).map(comp => comp.id));
     const wireIds = new Set((sheet.wires || []).map(wire => wire.id));
-    const alive = pickedRef.current.filter(item => (
+    const wanted = !selectedElement
+      ? []
+      : selectedElement.type === 'group'
+        ? (selectedElement.items || [])
+        : (selectedElement.type === 'component' || selectedElement.type === 'wire')
+          ? [{ type: selectedElement.type, id: selectedElement.id }]
+          : [];
+    const alive = wanted.filter(item => (
       item.type === 'component' ? compIds.has(item.id) : item.type === 'wire' && wireIds.has(item.id)
     ));
-    if (!selectedElement) {
-      if (pickedRef.current.length) commitPicked([]);
-      return;
-    }
-    if (alive.length !== pickedRef.current.length) commitPicked(alive);
+    const current = pickedRef.current;
+    const same = alive.length === current.length
+      && alive.every((item, index) => current[index]?.type === item.type && current[index]?.id === item.id);
+    if (!same) commitPicked(alive);
   }, [sheet.components, sheet.wires, selectedElement]);
 
   // Adjust canvas size on container resize
@@ -1137,7 +1202,7 @@ export default function CadCanvas({
       />
       {activeTool === 'select' && !isSimulating && (
         <div className="absolute left-3 top-3 pointer-events-none px-2 py-1 rounded border border-autocad-border bg-autocad-raised/90 text-[11px] text-autocad-cyan">
-          Arrastra en el plano. El recuadro marca todo lo que quieras seleccionar.
+          Arrastra en el plano para marcar piezas. Junto a un borne se activa el cable, y al alejarte vuelve la selección. Ctrl+C copia y Ctrl+V pega.
         </div>
       )}
       {activeTool === 'rotate' && (
@@ -1149,7 +1214,7 @@ export default function CadCanvas({
         <div className="absolute left-3 top-3 pointer-events-none px-2 py-1 rounded border border-autocad-border bg-autocad-raised/90 text-[11px] text-autocad-cyan">
           {wireRoute
             ? `Recorrido desde ${wireRoute.title}. Pulsa para doblar. En un cable nace la unión. Doble clic termina.`
-            : 'Pulsa un borne o el plano. Junto a otro cable, un clic los une. El área es corta y el círculo marca la unión.'}
+            : 'El selector de cable está activo junto al borne. Aléjate y vuelve la selección. Un clic en el borne empieza el recorrido.'}
         </div>
       )}
       {activeTool === 'wire' && hoverPin && !pinPrompt && (

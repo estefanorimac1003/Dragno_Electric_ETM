@@ -1,11 +1,11 @@
 // Symbol Store and Dynamic Component Customization Engine
 // Handles custom piece geometries, pin connections, storage in localStorage and rendering
 
-import { SYMBOL_DEFINITIONS as DEFAULT_SYMBOLS, CATEGORIES as DEFAULT_CATEGORIES, SWITCH_GROUP } from './symbolCatalog';
+import { SYMBOL_DEFINITIONS as DEFAULT_SYMBOLS, CATEGORIES as DEFAULT_CATEGORIES, SWITCH_GROUP, TERMINAL_GROUP } from './symbolCatalog';
 import { DEFAULT_LAYERS, layerState } from './draw/geometry';
 import { labelAnchorBox } from './componentLabel';
 import { defaultPinLinks } from './pinLinks';
-import { ioOf, userCanOperate } from './ioKind';
+import { ioOf, isTerminalSymbol, userCanOperate } from './ioKind';
 import { tracePrimitive } from './draw/tracePrimitive';
 import { applyDash } from './draw/lineStyle';
 
@@ -228,9 +228,14 @@ export function getActiveSymbolDefinitions() {
       delete stored.linkedRole;
       delete stored.behavior;
       if (!stored.role) {
-        // A drawn motor keeps the three-phase sequence. Other drawn pieces
-        // stay switches, because the editor does not store a role.
-        stored.role = /^motor\b/i.test(String(stored.name || '').trim()) ? 'motor' : 'switch';
+        // A drawn motor keeps the three-phase sequence. A piece in Borneras,
+        // or one whose library name is Borne, stays a connector. The saved
+        // drawing drops role, so the name is what recognizes Borne 1 when it
+        // still sits in Interruptores y Botoneras. Other drawn pieces stay
+        // switches.
+        const libraryName = String(stored.name || '').trim();
+        if (stored.category === TERMINAL_GROUP || isTerminalSymbol({ name: libraryName })) stored.role = 'terminal';
+        else stored.role = /^motor\b/i.test(libraryName) ? 'motor' : 'switch';
       }
       stored.defaultState = { on: false };
     }
@@ -267,32 +272,42 @@ export function librarySymbolDefinitions(defs = {}) {
 
 export function createBlankSymbol(category = 'Personalizados') {
   const type = `CUSTOM_${Date.now()}`;
+  const terminal = category === TERMINAL_GROUP;
+  const pins = terminal
+    ? [
+      { id: '1', label: '1', x: 0, y: -20 },
+      { id: '2', label: '1', x: 0, y: 20 }
+    ]
+    : [
+      { id: '1', label: '1', x: 0, y: -25 },
+      { id: '2', label: '2', x: 0, y: 25 }
+    ];
   const def = {
     type,
-    name: 'Nueva Pieza Eléctrica',
-    prefix: 'U',
+    name: terminal ? 'Borne' : 'Nueva Pieza Eléctrica',
+    prefix: terminal ? 'X' : 'U',
     category: category || 'Personalizados',
-    role: 'switch',
-    io: 'in',
+    role: terminal ? 'terminal' : 'switch',
+    io: terminal ? 'out' : 'in',
     ...(category === SWITCH_GROUP ? { momentary: true } : {}),
     defaultState: { on: false },
-    width: 40,
-    height: 50,
+    width: terminal ? 24 : 40,
+    height: terminal ? 44 : 50,
     pinRadius: 1.5,
-    pins: [
-      { id: '1', label: '1', x: 0, y: -25 },
-      { id: '2', label: '2', x: 0, y: 25 }
-    ],
-    pinLinks: defaultPinLinks([
-      { id: '1', label: '1', x: 0, y: -25 },
-      { id: '2', label: '2', x: 0, y: 25 }
-    ]),
-    primitives: [
-      { id: 'p1', type: 'rect', x: -15, y: -15, width: 30, height: 30, stroke: '#00e5ff', strokeWidth: 2, fill: 'none' },
-      { id: 'p2', type: 'line', x1: 0, y1: -25, x2: 0, y2: -15, stroke: '#00e5ff', strokeWidth: 2 },
-      { id: 'p3', type: 'line', x1: 0, y1: 15, x2: 0, y2: 25, stroke: '#00e5ff', strokeWidth: 2 },
-      { id: 'p4', type: 'text', x: 0, y: 0, text: '{tag}', color: '#ffd600', fontSize: 10, align: 'center' }
-    ],
+    pins,
+    pinLinks: defaultPinLinks(pins),
+    primitives: terminal
+      ? [
+        { id: 'p1', type: 'line', x1: 0, y1: -20, x2: 0, y2: -6, stroke: '#00e5ff', strokeWidth: 2 },
+        { id: 'p2', type: 'circle', cx: 0, cy: 0, r: 6, stroke: '#00e5ff', strokeWidth: 2, fill: 'none' },
+        { id: 'p3', type: 'line', x1: 0, y1: 6, x2: 0, y2: 20, stroke: '#00e5ff', strokeWidth: 2 }
+      ]
+      : [
+        { id: 'p1', type: 'rect', x: -15, y: -15, width: 30, height: 30, stroke: '#00e5ff', strokeWidth: 2, fill: 'none' },
+        { id: 'p2', type: 'line', x1: 0, y1: -25, x2: 0, y2: -15, stroke: '#00e5ff', strokeWidth: 2 },
+        { id: 'p3', type: 'line', x1: 0, y1: 15, x2: 0, y2: 25, stroke: '#00e5ff', strokeWidth: 2 },
+        { id: 'p4', type: 'text', x: 0, y: 0, text: '{tag}', color: '#ffd600', fontSize: 10, align: 'center' }
+      ],
     activePrimitives: [],
     layers: DEFAULT_LAYERS.map(layer => ({ ...layer })),
     isCustom: true
@@ -318,6 +333,7 @@ export function isCustomDrawn(def) {
 export function isSymbolActuated(comp, def) {
   const state = comp?.state || {};
   if (isCustomDrawn(def)) {
+    if (isTerminalSymbol(def)) return !!comp?.energized;
     if (userCanOperate(def, comp) && (state.on || state.pressed || state.forced)) return true;
     if (def.role === 'coil' || def.role === 'load' || def.role === 'motor') {
       return !!comp?.energized || !!comp?.linked;
@@ -368,8 +384,13 @@ export function renderSymbolPrimitives(ctx, primitives, comp, isSimulating, def,
     let fillColor = prim.fill || 'none';
 
     // A drawn piece keeps the colors of the sprite that is on screen.
+    // A borne is the exception: every copy of a live tag turns green together.
     const keepDrawnColors = options.preserveColors || isCustomDrawn(def);
-    if (!keepDrawnColors && isEnergized) {
+    const terminalOn = isSimulating && isTerminalSymbol(def) && !!comp?.energized;
+    if (terminalOn) {
+      strokeColor = '#00e676';
+      if (fillColor !== 'none') fillColor = 'rgba(0, 230, 118, 0.35)';
+    } else if (!keepDrawnColors && isEnergized) {
       if (def?.role === 'coil') {
         strokeColor = '#00e676';
         if (fillColor !== 'none') fillColor = 'rgba(0, 230, 118, 0.25)';

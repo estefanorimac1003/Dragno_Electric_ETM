@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Maximize2, Minimize2, Plus, RotateCcw, Save, Trash2, X, Zap } from 'lucide-react';
-import { CATEGORIES, SWITCH_GROUP, SYMBOL_DEFINITIONS } from '../cad/symbolCatalog';
+import { CATEGORIES, SWITCH_GROUP, TERMINAL_GROUP, SYMBOL_DEFINITIONS } from '../cad/symbolCatalog';
 import { pushbuttonActuation } from '../cad/pushbutton';
 import { DEFAULT_LAYERS, cloneData, primitiveNodes } from '../cad/draw/geometry';
 import { useCadDraw } from '../cad/draw/useCadDraw';
@@ -37,7 +37,7 @@ function mouseOperableSymbol(def, role) {
 }
 
 function programForEditor(program, operable, name, role) {
-  if (role === 'motor') return emptyProgram();
+  if (role === 'motor' || role === 'terminal') return emptyProgram();
   const base = normalizeProgram(program);
   return operable ? withActuatedBlock(base, name) : stripActuatedBlocks(base);
 }
@@ -145,7 +145,7 @@ export default function SymbolEditorModal({
     setSymbolCategory(def.category || 'Personalizados');
     setSymbolActuation(pushbuttonActuation(def));
     setSymbolRole(def.role || 'switch');
-    if (def.role === 'source' || def.role === 'motor') setProgramOpen(false);
+    if (def.role === 'source' || def.role === 'motor' || def.role === 'terminal') setProgramOpen(false);
     setSymbolWidth(def.width || 40);
     setSymbolHeight(def.height || 50);
     setPinRadius(def.pinRadius ?? DEFAULT_PIN_RADIUS);
@@ -203,7 +203,7 @@ export default function SymbolEditorModal({
   }, [isOpen, selectedType, initialSymbolType, loadSymbol]);
 
   useEffect(() => {
-    if (!isOpen || symbolRole === 'motor' || symbolRole === 'source') return;
+    if (!isOpen || symbolRole === 'motor' || symbolRole === 'source' || symbolRole === 'terminal') return;
     const stored = defsRef.current?.[selectedType];
     if (!mouseOperableSymbol(stored, symbolRole)) return;
     setProgram(current => {
@@ -278,7 +278,7 @@ export default function SymbolEditorModal({
   const handleSave = () => writeSymbol(program, true);
 
   const handleProgramChange = (next) => {
-    const operable = symbolRole !== 'motor' && symbolRole !== 'source' && mouseOperableSymbol(defsRef.current?.[selectedType], symbolRole);
+    const operable = symbolRole !== 'motor' && symbolRole !== 'source' && symbolRole !== 'terminal' && mouseOperableSymbol(defsRef.current?.[selectedType], symbolRole);
     const wrapped = programForEditor(next, operable, symbolName, symbolRole);
     setProgram(wrapped);
     if (programLogicKey(wrapped) === programKeyRef.current) return;
@@ -396,7 +396,7 @@ export default function SymbolEditorModal({
               <h2 className="font-bold text-autocad-cyan uppercase tracking-wider text-sm truncate">Editor de piezas</h2>
               <p className="text-[10px] text-autocad-textMuted truncate">Lienzo vectorial con snaps, nodos, capas y dos sprites.</p>
             </div>
-            {symbolRole !== 'source' && symbolRole !== 'motor' && (
+            {symbolRole !== 'source' && symbolRole !== 'motor' && symbolRole !== 'terminal' && (
               <button
                 type="button"
                 onClick={() => setProgramOpen(true)}
@@ -548,13 +548,26 @@ export default function SymbolEditorModal({
                 <input value={symbolName} onChange={(event) => setSymbolName(event.target.value)} className="mt-0.5 w-full bg-autocad-inset border border-autocad-border rounded px-2 py-1 text-xs text-white" />
               </label>
               <label className="block text-[10px] text-autocad-textMuted">Grupo
-                <select value={symbolCategory} onChange={(event) => setSymbolCategory(event.target.value)} className="mt-0.5 w-full bg-autocad-inset border border-autocad-border rounded p-1 text-xs text-white">
+                <select
+                  value={symbolCategory}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setSymbolCategory(next);
+                    if (next === TERMINAL_GROUP) {
+                      setSymbolRole('terminal');
+                      setProgramOpen(false);
+                    } else if (symbolRole === 'terminal') {
+                      setSymbolRole('switch');
+                    }
+                  }}
+                  className="mt-0.5 w-full bg-autocad-inset border border-autocad-border rounded p-1 text-xs text-white"
+                >
                   {[...CATEGORIES, 'Personalizados'].map(category => (
                     <option key={category} value={category}>{category}</option>
                   ))}
                 </select>
               </label>
-              {symbolCategory === SWITCH_GROUP && (
+              {symbolCategory === SWITCH_GROUP && symbolRole !== 'terminal' && (
                 <div className="space-y-1">
                   <span className="block text-[10px] text-autocad-textMuted">Estado del interruptor</span>
                   <div className="grid grid-cols-2 gap-1">
@@ -676,7 +689,7 @@ export default function SymbolEditorModal({
         </div>
       </div>
       <BlockProgramWindow
-        open={programOpen && symbolRole !== 'source' && symbolRole !== 'motor'}
+        open={programOpen && symbolRole !== 'source' && symbolRole !== 'motor' && symbolRole !== 'terminal'}
         title={symbolName}
         pins={pins}
         program={program}

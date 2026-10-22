@@ -23,6 +23,7 @@ import { applyPlanTheme, readStoredPlanTheme } from './theme/planThemes';
 import { reanchorWire } from './cad/componentPose';
 import { applySelectionMove, insertWirePoint } from './cad/wireGeometry';
 import { createDesignHistory, endDesignGesture, noteDesignChange, redoDesign, undoDesign } from './cad/designHistory';
+import { copySelection, duplicateSheetPieces, nextCopyTitle, pasteCopies } from './cad/clipboard';
 import { ioOf, userCanOperate } from './cad/ioKind';
 import { isMomentaryPushbutton, pressedPushbuttonState, releasedPushbuttonState } from './cad/pushbutton';
 
@@ -94,6 +95,11 @@ export default function App() {
 
   // Active Tool & Placement
   const [activeTool, setActiveTool] = useState('select'); // 'select' | 'wire' | 'pan' | 'delete' | 'rotate'
+  const [toolPick, setToolPick] = useState(0);
+  const chooseTool = (tool) => {
+    setActiveTool(tool);
+    setToolPick(value => value + 1);
+  };
   const [placingSymbol, setPlacingSymbol] = useState(null);
 
   // Selected Element Inspector
@@ -181,6 +187,11 @@ export default function App() {
   symbolDefsRef.current = symbolDefs;
   const isSimulatingRef = useRef(isSimulating);
   isSimulatingRef.current = isSimulating;
+  const selectedElementRef = useRef(selectedElement);
+  selectedElementRef.current = selectedElement;
+  const clipboardRef = useRef(null);
+  const handleCopyRef = useRef(() => false);
+  const handlePasteRef = useRef(() => false);
   const derivedSimRef = useRef(new Map());
   const simSignatureRef = useRef('');
   const heldInteractionRef = useRef(null);
@@ -400,6 +411,12 @@ export default function App() {
       } else if (key === 'y' || (key === 'z' && event.shiftKey)) {
         event.preventDefault();
         handleRedoRef.current();
+      } else if (key === 'c' || key === 'v') {
+        const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target?.tagName)
+          || event.target?.isContentEditable;
+        if (typing) return;
+        const handled = key === 'c' ? handleCopyRef.current() : handlePasteRef.current();
+        if (handled) event.preventDefault();
       }
     };
     window.addEventListener('mouseup', onPointerUp);
@@ -487,6 +504,54 @@ export default function App() {
     commitSimulation(next);
   };
 
+  const handleCopySelection = () => {
+    if (isSimulatingRef.current) return false;
+    const source = projectRef.current;
+    const sheet = source.sheets.find(item => item.id === activeSheetIdRef.current) || source.sheets[0];
+    const copied = copySelection(sheet, selectedElementRef.current, (comp) => defFor(comp.type)?.prefix || '');
+    if (!copied) return false;
+    clipboardRef.current = copied;
+    return true;
+  };
+
+  const handlePasteSelection = () => {
+    if (isSimulatingRef.current) return false;
+    const clip = clipboardRef.current;
+    if (!clip?.components?.length) return false;
+    const source = projectRef.current;
+    const sheetId = activeSheetIdRef.current;
+    const existing = source.sheets.flatMap(sheet => sheet.components || []);
+    const pasted = pasteCopies(clip, existing);
+    if (!pasted?.components?.length) return false;
+    clipboardRef.current = { ...clip, generation: pasted.generation };
+    rememberDesign();
+    setProject(prev => ({
+      ...prev,
+      sheets: prev.sheets.map(sheet => (
+        sheet.id === sheetId
+          ? {
+            ...sheet,
+            components: [...(sheet.components || []), ...pasted.components],
+            wires: [...(sheet.wires || []), ...pasted.wires]
+          }
+          : sheet
+      ))
+    }));
+    const items = [
+      ...pasted.components.map(comp => ({ type: 'component', id: comp.id })),
+      ...pasted.wires.map(wire => ({ type: 'wire', id: wire.id }))
+    ];
+    if (items.length === 1) {
+      setSelectedElement({ type: 'component', id: pasted.components[0].id, data: pasted.components[0] });
+    } else {
+      setSelectedElement({ type: 'group', items });
+    }
+    return true;
+  };
+
+  handleCopyRef.current = handleCopySelection;
+  handlePasteRef.current = handlePasteSelection;
+
   // Add Component (Place Symbol onto active sheet)
   const handlePlaceSymbol = (symbolType, x, y) => {
     const def = symbolDefs[symbolType] || SYMBOL_DEFINITIONS[symbolType];
@@ -514,7 +579,7 @@ export default function App() {
     }));
 
     setPlacingSymbol(null);
-    setActiveTool('select');
+    chooseTool('select');
   };
 
   // Update Component (e.g. tag, position, rotation, state)
@@ -690,6 +755,7 @@ export default function App() {
   };
 
   const handleCloseSheet = (sheetId) => {
+    if (isSimulating) return;
     if (project.sheets.length <= 1) return;
     const filtered = project.sheets.filter(s => s.id !== sheetId);
     rememberDesign();
@@ -707,6 +773,45 @@ export default function App() {
         sheet.id === activeSheetId ? { ...sheet, ...updates } : sheet
       )
     }));
+  };
+
+  const handleRenameSheet = (sheetId, title) => {
+    const nextTitle = String(title || '').trim();
+    if (!nextTitle) return;
+    const current = project.sheets.find(sheet => sheet.id === sheetId);
+    if (!current || current.title === nextTitle) return;
+    rememberDesign(`sheet:${sheetId}`);
+    setProject(prev => ({
+      ...prev,
+      sheets: prev.sheets.map(sheet => (
+        sheet.id === sheetId ? { ...sheet, title: nextTitle } : sheet
+      ))
+    }));
+  };
+
+  const handleCopySheet = (sheetId) => {
+    if (isSimulating) return;
+    const source = project.sheets.find(sheet => sheet.id === sheetId);
+    if (!source) return;
+    const pieces = duplicateSheetPieces(
+      source,
+      project.sheets.flatMap(sheet => sheet.components || []),
+      (comp) => defFor(comp.type)?.prefix || ''
+    );
+    const copy = {
+      ...source,
+      id: `sheet_${Date.now()}`,
+      title: nextCopyTitle(source.title, project.sheets.map(sheet => sheet.title)),
+      components: pieces.components,
+      wires: pieces.wires
+    };
+    rememberDesign();
+    setProject(prev => ({
+      ...prev,
+      sheets: [...prev.sheets, copy]
+    }));
+    setActiveSheetId(copy.id);
+    setSelectedElement(null);
   };
 
   // Load Presets
@@ -808,8 +913,10 @@ export default function App() {
         onSelectSheet={setActiveSheetId}
         onAddSheet={handleAddSheet}
         onCloseSheet={handleCloseSheet}
+        onRenameSheet={handleRenameSheet}
+        onCopySheet={handleCopySheet}
         activeTool={activeTool}
-        setActiveTool={setActiveTool}
+        setActiveTool={chooseTool}
         onSaveProject={handleSaveProject}
         canUndo={historySteps.undo > 0}
         canRedo={historySteps.redo > 0}
@@ -840,7 +947,7 @@ export default function App() {
           onSelectSheet={setActiveSheetId}
           onStartPlaceSymbol={(symType) => {
             setPlacingSymbol(symType);
-            setActiveTool('select');
+            chooseTool('select');
           }}
           activePlacingSymbol={placingSymbol}
           allComponents={allComponents}
@@ -875,6 +982,8 @@ export default function App() {
             orthoEnabled={orthoEnabled}
             onCursorMove={(x, y) => setCursorPos({ x, y })}
             onSimulationPointerDown={handleSimulationPointerDown}
+            setActiveTool={setActiveTool}
+            toolPick={toolPick}
           />
         </main>
 

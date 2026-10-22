@@ -43,6 +43,7 @@ export default function LeftSidebar({
     'Protección Eléctrica': true,
     'Mandos y Actuadores': true,
     'Maniobra y control': true,
+    'Borneras y conexiones': true,
     'Cargas y Motores': true,
   });
 

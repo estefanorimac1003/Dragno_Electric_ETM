@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { PLAN_THEME_LIST } from '../theme/planThemes';
 import {
   MousePointer,
@@ -30,6 +30,8 @@ export default function TopBar({
   onSelectSheet,
   onAddSheet,
   onCloseSheet,
+  onRenameSheet,
+  onCopySheet,
   activeTool,
   setActiveTool,
   onZoomFit,
@@ -54,6 +56,43 @@ export default function TopBar({
   onPlanTheme
 }) {
   const openFileRef = useRef(null);
+  const skipRenameCommit = useRef(false);
+  const [editingSheetId, setEditingSheetId] = useState(null);
+  const [sheetDraft, setSheetDraft] = useState('');
+
+  const startRename = (sheet) => {
+    if (isSimulating || !sheet) return;
+    setEditingSheetId(sheet.id);
+    setSheetDraft(sheet.title || '');
+  };
+
+  const commitRename = () => {
+    if (skipRenameCommit.current) {
+      skipRenameCommit.current = false;
+      setEditingSheetId(null);
+      return;
+    }
+    const sheetId = editingSheetId;
+    const title = sheetDraft.trim();
+    setEditingSheetId(null);
+    if (sheetId && title && onRenameSheet) onRenameSheet(sheetId, title);
+  };
+
+  const pageButton = (label, title, onClick, disabled) => (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`px-2 py-1 rounded border text-[10px] font-semibold ${
+        disabled
+          ? 'border-autocad-border text-autocad-textMuted opacity-40'
+          : 'border-autocad-border bg-autocad-panel text-autocad-textBright hover:border-autocad-cyan hover:text-autocad-cyan'
+      }`}
+    >
+      {label}
+    </button>
+  );
 
   return (
     <header className="plan-frame flex flex-col bg-autocad-panel border-b border-autocad-border text-xs select-none">
@@ -209,44 +248,92 @@ export default function TopBar({
       {/* 2. Sheet Tabs Bar & Floating Toolset */}
       <div className="flex items-center justify-between px-2 py-1 bg-autocad-canvas">
         {/* Sheet Tabs (ControlMAX 360 / AutoCAD Layout tabs) */}
-        <div className="flex items-center gap-1 overflow-x-auto max-w-[60%]">
-          {sheets.map((sheet, idx) => {
-            const isActive = sheet.id === activeSheetId;
-            return (
-              <div
-                key={sheet.id}
-                onClick={() => onSelectSheet(sheet.id)}
-                className={`group flex items-center gap-2 px-3 py-1 rounded-t border-t-2 cursor-pointer transition text-[11px] ${
-                  isActive
-                    ? 'bg-autocad-panel border-autocad-cyan text-autocad-cyan font-semibold shadow-inner'
-                    : 'bg-autocad-surface border-transparent text-autocad-textMuted hover:text-white hover:bg-autocad-hover'
-                }`}
-              >
-                <FileCode2 className="w-3 h-3 text-autocad-yellow" />
-                <span className="truncate max-w-[150px]">{sheet.title}</span>
-                {sheets.length > 1 && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onCloseSheet(sheet.id);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-red-900/60 hover:text-red-300 rounded"
-                  >
-                    <X className="w-2.5 h-2.5" />
-                  </button>
-                )}
-              </div>
-            );
-          })}
+        <div className="flex items-center gap-1 min-w-0 flex-1 mr-2">
+          <div className="flex items-center gap-1 overflow-x-auto min-w-0">
+            {sheets.map((sheet) => {
+              const isActive = sheet.id === activeSheetId;
+              const editing = editingSheetId === sheet.id;
+              return (
+                <div
+                  key={sheet.id}
+                  onClick={() => onSelectSheet(sheet.id)}
+                  onDoubleClick={() => startRename(sheet)}
+                  className={`group flex items-center gap-2 px-3 py-1 rounded-t border-t-2 cursor-pointer transition text-[11px] ${
+                    isActive
+                      ? 'bg-autocad-panel border-autocad-cyan text-autocad-cyan font-semibold shadow-inner'
+                      : 'bg-autocad-surface border-transparent text-autocad-textMuted hover:text-white hover:bg-autocad-hover'
+                  }`}
+                >
+                  <FileCode2 className="w-3 h-3 text-autocad-yellow shrink-0" />
+                  {editing ? (
+                    <input
+                      autoFocus
+                      value={sheetDraft}
+                      onChange={(event) => setSheetDraft(event.target.value)}
+                      onClick={(event) => event.stopPropagation()}
+                      onDoubleClick={(event) => event.stopPropagation()}
+                      onBlur={commitRename}
+                      onKeyDown={(event) => {
+                        event.stopPropagation();
+                        if (event.key === 'Enter') event.currentTarget.blur();
+                        if (event.key === 'Escape') {
+                          skipRenameCommit.current = true;
+                          event.currentTarget.blur();
+                        }
+                      }}
+                      className="w-36 bg-autocad-inset border border-autocad-cyan rounded px-1 py-0 text-[11px] text-autocad-textBright focus:outline-none"
+                    />
+                  ) : (
+                    <span className="truncate max-w-[150px]" title="Doble clic para cambiar el nombre">{sheet.title}</span>
+                  )}
+                  {sheets.length > 1 && !editing && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onCloseSheet(sheet.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-red-900/60 hover:text-red-300 rounded"
+                      title="Eliminar esta página"
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
 
-          {/* Add Sheet Button */}
-          <button
-            onClick={onAddSheet}
-            className="p-1 text-autocad-textMuted hover:text-autocad-cyan hover:bg-autocad-hover rounded ml-1"
-            title="Añadir nueva hoja / plano de circuito"
-          >
-            <Plus className="w-3.5 h-3.5" />
-          </button>
+            <button
+              type="button"
+              onClick={onAddSheet}
+              disabled={isSimulating}
+              className="p-1 text-autocad-textMuted hover:text-autocad-cyan hover:bg-autocad-hover rounded ml-1 disabled:opacity-40"
+              title="Nueva página"
+            >
+              <Plus className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1 shrink-0 pl-1 border-l border-autocad-border">
+            {pageButton(
+              'Cambiar nombre',
+              'Cambiar el nombre de la página activa',
+              () => startRename(sheets.find(sheet => sheet.id === activeSheetId)),
+              isSimulating
+            )}
+            {pageButton(
+              'Copiar',
+              'Copiar esta página en una hoja nueva',
+              () => onCopySheet && onCopySheet(activeSheetId),
+              isSimulating
+            )}
+            {pageButton(
+              'Eliminar',
+              sheets.length > 1 ? 'Eliminar la página activa' : 'Tiene que quedar al menos una página',
+              () => onCloseSheet(activeSheetId),
+              isSimulating || sheets.length < 2
+            )}
+          </div>
         </div>
 
         {/* CAD Tools & Toggles (Select, Wire, Pan, Del, Grid, Snap, Ortho) */}

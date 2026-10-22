@@ -2,7 +2,7 @@
 // An offset is the right edge of that text, measured from the piece origin.
 
 import { boundsOfMany } from './draw/geometry.js';
-import { rotatedBounds } from './componentPose.js';
+import { normalizeRotation, rotatedBounds, unrotateOffset } from './componentPose.js';
 
 export const TAG_FONT = 'bold 11px Consolas, monospace';
 export const NAME_FONT = '11px Consolas, monospace';
@@ -82,6 +82,11 @@ export function nameIsPlaced(comp) {
   return !!placedOffset(comp?.nameOffset);
 }
 
+// Quarter turns, clockwise on the sheet. Zero keeps the text horizontal.
+export function textTurn(degrees) {
+  return normalizeRotation(degrees);
+}
+
 function leftOfPiece(rotation, box, yShift) {
   const spun = rotatedBounds(box, rotation);
   return {
@@ -116,7 +121,9 @@ export function componentLabels(comp, def) {
     tagY: originY + tagOffset.y,
     nameX: originX + nameOffset.x,
     nameY: originY + nameOffset.y,
-    nameStyle: style
+    nameStyle: style,
+    tagRotation: textTurn(comp?.tagRotation),
+    nameRotation: textTurn(comp?.nameRotation)
   };
 }
 
@@ -164,6 +171,12 @@ function contains(box, x, y) {
   return x >= box.minX && x <= box.maxX && y >= box.minY && y <= box.maxY;
 }
 
+// The click is tested in the text's own frame, so a turned label still answers.
+function pointInTextFrame(worldX, worldY, anchorX, anchorY, rotation) {
+  const local = unrotateOffset(worldX - anchorX, worldY - anchorY, rotation);
+  return { x: anchorX + local.x, y: anchorY + local.y };
+}
+
 export function nameHitBox(comp, def, measureText) {
   const layout = nameLinePositions(comp, def);
   if (!layout.lines.length) return null;
@@ -191,11 +204,15 @@ export function labelPartAt(comp, def, worldX, worldY, measureText) {
   const hits = [];
   if (labels.tag) {
     const box = textHitBox(labels.tagX, labels.tagY, labels.tag, TAG_FONT, measureText, 11);
-    if (contains(box, worldX, worldY)) hits.push({ part: 'tag', box, x: labels.tagX, y: labels.tagY });
+    const local = pointInTextFrame(worldX, worldY, labels.tagX, labels.tagY, labels.tagRotation);
+    if (contains(box, local.x, local.y)) hits.push({ part: 'tag', box, x: labels.tagX, y: labels.tagY });
   }
   const nameBox = nameHitBox(comp, def, measureText);
-  if (nameBox && contains(nameBox, worldX, worldY)) {
-    hits.push({ part: 'name', box: nameBox, x: labels.nameX, y: labels.nameY });
+  if (nameBox) {
+    const local = pointInTextFrame(worldX, worldY, labels.nameX, labels.nameY, labels.nameRotation);
+    if (contains(nameBox, local.x, local.y)) {
+      hits.push({ part: 'name', box: nameBox, x: labels.nameX, y: labels.nameY });
+    }
   }
   if (!hits.length) return null;
   hits.sort((a, b) => Math.hypot(worldX - a.x, worldY - a.y) - Math.hypot(worldX - b.x, worldY - b.y));

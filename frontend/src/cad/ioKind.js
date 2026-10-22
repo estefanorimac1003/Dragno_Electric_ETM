@@ -14,7 +14,15 @@ export function ioOf(def, comp) {
   return 'out';
 }
 
+// A connector joins same tags. The library name still counts when an older
+// copy kept the switch role from Interruptores y Botoneras.
+export function isTerminalSymbol(def) {
+  if (def?.role === 'terminal') return true;
+  return /^(borne|bornera)s?\b/i.test(String(def?.name || '').trim());
+}
+
 export function userCanOperate(def, comp) {
+  if (isTerminalSymbol(def)) return false;
   const io = ioOf(def, comp);
   return io === 'in' || io === 'inout';
 }

@@ -98,7 +98,7 @@ export function generateDxf(sheetData, options = {}) {
   };
 
   // Helper: add TEXT entity
-  const addText = (text, x, y, height = 3.5, layer = 'ESQ_TEXTOS', color = null, align = 'left') => {
+  const addText = (text, x, y, height = 3.5, layer = 'ESQ_TEXTOS', color = null, align = 'left', rotation = 0) => {
     if (!text) return;
     dxf += '0\nTEXT\n';
     dxf += `8\n${layer}\n`;
@@ -108,6 +108,8 @@ export function generateDxf(sheetData, options = {}) {
     dxf += '30\n0.0\n';
     dxf += `40\n${Number(height).toFixed(2)}\n`;
     dxf += `1\n${text}\n`;
+    const turn = normalizeRotation(rotation);
+    if (turn) dxf += `50\n${(360 - turn) % 360}\n`;
     if (align === 'right' || align === 'center') {
       dxf += `72\n${align === 'center' ? 1 : 2}\n`;
       dxf += `11\n${toCadX(x)}\n`;
@@ -188,14 +190,21 @@ export function generateDxf(sheetData, options = {}) {
     };
     const def = (options.symbolDefs && options.symbolDefs[comp.type]) || SYMBOL_DEFINITIONS[comp.type];
     const labels = componentLabels(comp, def);
-    placeText(labels.tag, labels.tagX, labels.tagY, 3.5, 'ESQ_TEXTOS', 2, 'right');
+    placeText(labels.tag, labels.tagX, labels.tagY, 3.5, 'ESQ_TEXTOS', 2, 'right', labels.tagRotation);
     const nameLayout = nameLinePositions(comp, def);
+    const nameTurn = nameLayout.labels.nameRotation;
     nameLayout.lines.forEach(line => {
       if (!line.text) return;
       const height = Math.max(1.6, nameLayout.style.size / 4);
       const align = nameLayout.style.align;
-      placeText(line.text, line.x, line.y, height, 'ESQ_TEXTOS', 7, align);
-      if (nameLayout.style.bold) placeText(line.text, line.x + 0.35, line.y, height, 'ESQ_TEXTOS', 7, align);
+      const spun = rotateOffset(line.x - labels.nameX, line.y - labels.nameY, nameTurn);
+      const x = labels.nameX + spun.x;
+      const y = labels.nameY + spun.y;
+      placeText(line.text, x, y, height, 'ESQ_TEXTOS', 7, align, nameTurn);
+      if (nameLayout.style.bold) {
+        const bold = rotateOffset(0.35, 0, nameTurn);
+        placeText(line.text, x + bold.x, y + bold.y, height, 'ESQ_TEXTOS', 7, align, nameTurn);
+      }
     });
 
     negationMarks(comp, def).forEach(mark => {
